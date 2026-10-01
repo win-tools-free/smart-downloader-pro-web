@@ -3,21 +3,20 @@ import re
 import shutil
 import threading
 import uuid
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yt_dlp
-
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-
 from pydantic import BaseModel, Field
 
 
-# =========================================================
-# APP CONFIGURATION
-# =========================================================
+# ============================================================
+# APP CONFIG
+# ============================================================
 
 APP_NAME = "Smart Downloader Pro Web"
 
@@ -26,53 +25,65 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_ROOT = Path(
     os.getenv(
         "DOWNLOAD_DIR",
-        BASE_DIR / "server_downloads"
+        str(BASE_DIR / "server_downloads")
     )
 )
+
+MAX_PLAYLIST_ITEMS = int(
+    os.getenv("MAX_PLAYLIST_ITEMS", "999")
+)
+
+MAX_SEARCH_RESULTS = int(
+    os.getenv("MAX_SEARCH_RESULTS", "30")
+)
+
+MAX_CONCURRENT_JOBS = int(
+    os.getenv("MAX_CONCURRENT_JOBS", "2")
+)
+
 
 DOWNLOAD_ROOT.mkdir(
     parents=True,
     exist_ok=True
 )
 
-MAX_PLAYLIST_ITEMS = int(
-    os.getenv(
-        "MAX_PLAYLIST_ITEMS",
-        "999"
-    )
-)
 
-MAX_SEARCH_RESULTS = int(
-    os.getenv(
-        "MAX_SEARCH_RESULTS",
-        "30"
-    )
-)
+# ============================================================
+# FASTAPI
+# ============================================================
 
-MAX_CONCURRENT_JOBS = int(
-    os.getenv(
-        "MAX_CONCURRENT_JOBS",
-        "2"
-    )
+app = FastAPI(
+    title=APP_NAME,
+    version="2.0.0"
 )
 
 
-# =========================================================
+STATIC_DIR = BASE_DIR / "static"
+
+if STATIC_DIR.exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIR)),
+        name="static"
+    )
+
+
+# ============================================================
 # JOB STORAGE
-# =========================================================
+# ============================================================
 
 jobs = {}
 
-jobs_lock = threading.RLock()
+jobs_lock = threading.Lock()
 
-job_semaphore = threading.Semaphore(
-    MAX_CONCURRENT_JOBS
-)
+active_jobs = 0
+
+active_jobs_lock = threading.Lock()
 
 
-# =========================================================
-# REQUEST MODELS
-# =========================================================
+# ============================================================
+# MODELS
+# ============================================================
 
 class DownloadRequest(BaseModel):
 
@@ -107,38 +118,23 @@ class SearchRequest(BaseModel):
     )
 
 
-# =========================================================
-# FASTAPI
-# =========================================================
-
-app = FastAPI(
-    title=APP_NAME
-)
-
-app.mount(
-    "/static",
-    StaticFiles(
-        directory=str(
-            BASE_DIR / "static"
-        )
-    ),
-    name="static"
-)
-
-
-# =========================================================
+# ============================================================
 # BASIC HELPERS
-# =========================================================
+# ============================================================
 
 def is_youtube_url(url: str) -> bool:
 
     try:
 
-        p = urlparse(
-            (url or "").strip().lower()
+        parsed = urlparse(
+            url.strip()
         )
 
-        host = p.netloc.split(":")[0]
+        host = (
+            parsed.netloc
+            .lower()
+            .split(":")[0]
+        )
 
         return host in {
             "youtube.com",
@@ -147,8 +143,6 @@ def is_youtube_url(url: str) -> bool:
             "music.youtube.com",
             "youtu.be",
             "www.youtu.be",
-            "youtube-nocookie.com",
-            "www.youtube-nocookie.com",
         }
 
     except Exception:
@@ -156,43 +150,37 @@ def is_youtube_url(url: str) -> bool:
         return False
 
 
-def safe_title(name: str) -> str:
+def safe_title(value: str) -> str:
 
-    name = str(
-        name or "video"
-    ).strip()
+    if not value:
+        return "download"
 
-    name = re.sub(
-        r"[\x00-\x1f<>:\"/\\|?*]",
+    value = re.sub(
+        r'[<>:"/\\|?*\x00-\x1F]',
         "_",
-        name
+        value
     )
 
-    name = re.sub(
+    value = re.sub(
         r"\s+",
         " ",
-        name
-    )
+        value
+    ).strip()
 
-    name = name.strip(
-        " ."
-    )
+    value = value.rstrip(". ")
 
-    return (
-        name[:240]
-        or "video"
-    )
+    if not value:
+        return "download"
+
+    return value[:180]
 
 
 def format_bytes(value):
 
     try:
-
-        value = float(value)
-
+        value = float(value or 0)
     except Exception:
-
-        return "Unknown"
+        return "0 B"
 
     units = [
         "B",
@@ -202,123 +190,48 @@ def format_bytes(value):
         "TB"
     ]
 
-    i = 0
+    for unit in units:
 
-    while (
-        value >= 1024
-        and i < len(units) - 1
-    ):
+        if value < 1024:
+            return f"{value:.1f} {unit}"
 
         value /= 1024
 
-        i += 1
-
-    return (
-        f"{value:.1f} "
-        f"{units[i]}"
-    )
+    return f"{value:.1f} PB"
 
 
-# =========================================================
-# RUNTIME DETECTION
-# =========================================================
+def get_ffmpeg():
 
-def get_deno_path():
+    path = shutil.which("ffmpeg")
 
-    """
-    Find Deno inside the Render/Linux container.
-    """
+    if path:
+        return path
 
-    deno_path = shutil.which(
-        "deno"
-    )
-
-    if deno_path:
-
-        return deno_path
-
-    # Additional common locations
-    possible_paths = [
-
-        "/usr/local/bin/deno",
-
-        "/root/.deno/bin/deno",
-
-        str(
-            BASE_DIR / "deno"
-        ),
-
-    ]
-
-    for path in possible_paths:
-
-        if (
-            Path(path).exists()
-            and os.access(
-                path,
-                os.X_OK
-            )
-        ):
-
-            return path
-
-    return None
+    return "ffmpeg"
 
 
-def get_ffmpeg_path():
+def get_ffprobe():
 
-    ffmpeg_path = shutil.which(
-        "ffmpeg"
-    )
+    path = shutil.which("ffprobe")
 
-    if ffmpeg_path:
+    if path:
+        return path
 
-        return ffmpeg_path
-
-    possible_paths = [
-
-        "/usr/bin/ffmpeg",
-
-        "/usr/local/bin/ffmpeg",
-
-        str(
-            BASE_DIR / "ffmpeg"
-        ),
-
-    ]
-
-    for path in possible_paths:
-
-        if Path(path).exists():
-
-            return path
-
-    return None
+    return "ffprobe"
 
 
-# =========================================================
-# YT-DLP / YOUTUBE CONFIGURATION
-# =========================================================
+def get_deno():
+
+    return shutil.which("deno")
+
+
+# ============================================================
+# YT-DLP CONFIGURATION
+# ============================================================
 
 def youtube_ydl_opts(extra=None):
 
-    """
-    Common yt-dlp configuration.
-
-    Used by:
-
-    - URL information
-    - Search
-    - Playlist
-    - Single video
-    - Actual downloads
-
-    Deno is used as the JavaScript runtime.
-    EJS support is enabled through yt-dlp-ejs /
-    the GitHub remote component.
-    """
-
-    deno_path = get_deno_path()
+    deno_path = get_deno()
 
     if not deno_path:
 
@@ -327,13 +240,7 @@ def youtube_ydl_opts(extra=None):
             "inside the server."
         )
 
-    ffmpeg_path = get_ffmpeg_path()
-
     opts = {
-
-        # -------------------------------------------------
-        # General
-        # -------------------------------------------------
 
         "quiet": True,
 
@@ -341,75 +248,41 @@ def youtube_ydl_opts(extra=None):
 
         "skip_download": True,
 
-        "noprogress": False,
-
-        "windowsfilenames": False,
-
-        "continuedl": True,
-
-        # -------------------------------------------------
-        # Network / retries
-        # -------------------------------------------------
-
         "retries": 5,
 
         "fragment_retries": 5,
 
         "extractor_retries": 3,
 
-        "socket_timeout": 60,
+        "socket_timeout": 30,
 
-        # -------------------------------------------------
-        # JavaScript runtime
-        # -------------------------------------------------
+        "ffmpeg_location": get_ffmpeg(),
 
+        # IMPORTANT:
+        # Current yt-dlp Python API expects a DICT here.
         "js_runtimes": {
-
             "deno": {
-
                 "path": deno_path
-
             }
-
         },
 
-        # -------------------------------------------------
-        # EJS
-        # -------------------------------------------------
-
+        # IMPORTANT:
+        # This must be a LIST, not a string.
         "remote_components": [
-
             "ejs:github"
-
         ],
-
-        # -------------------------------------------------
-        # FFmpeg
-        # -------------------------------------------------
-
-        "ffmpeg_location": (
-            ffmpeg_path
-            or "ffmpeg"
-        ),
-
     }
 
     if extra:
 
-        opts.update(
-            extra
-        )
+        opts.update(extra)
 
     return opts
 
 
-def base_ydl_opts(job_id: str):
+def base_ydl_opts(job_id):
 
-    """
-    Download configuration.
-    """
-
-    deno_path = get_deno_path()
+    deno_path = get_deno()
 
     if not deno_path:
 
@@ -418,27 +291,20 @@ def base_ydl_opts(job_id: str):
             "inside the server."
         )
 
-    ffmpeg_path = get_ffmpeg_path()
+    output_dir = (
+        DOWNLOAD_ROOT / job_id
+    )
 
-    opts = {
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-        # -------------------------------------------------
-        # General
-        # -------------------------------------------------
+    return {
 
         "quiet": True,
 
         "no_warnings": False,
-
-        "noprogress": False,
-
-        "windowsfilenames": False,
-
-        "continuedl": True,
-
-        # -------------------------------------------------
-        # Network
-        # -------------------------------------------------
 
         "retries": 5,
 
@@ -446,407 +312,382 @@ def base_ydl_opts(job_id: str):
 
         "extractor_retries": 3,
 
-        "socket_timeout": 60,
+        "socket_timeout": 30,
 
-        # -------------------------------------------------
-        # FFmpeg
-        # -------------------------------------------------
-
-        "ffmpeg_location": (
-            ffmpeg_path
-            or "ffmpeg"
-        ),
-
-        # -------------------------------------------------
-        # JavaScript runtime
-        # -------------------------------------------------
+        "ffmpeg_location": get_ffmpeg(),
 
         "js_runtimes": {
-
             "deno": {
-
                 "path": deno_path
-
             }
-
         },
 
-        # -------------------------------------------------
-        # EJS
-        # -------------------------------------------------
-
         "remote_components": [
-
             "ejs:github"
-
         ],
-
-        # -------------------------------------------------
-        # Progress
-        # -------------------------------------------------
 
         "progress_hooks": [
-
-            lambda d:
-                progress_hook(
-                    job_id,
-                    d
-                )
-
+            progress_hook
         ],
 
+        "outtmpl": str(
+            output_dir / "%(title)s.%(ext)s"
+        ),
+
+        "restrictfilenames": False,
+
+        "windowsfilenames": True,
+
+        "continuedl": True,
+
+        "nopart": False,
+
+        "noprogress": True,
     }
 
-    return opts
 
-
-# =========================================================
+# ============================================================
 # FORMAT SELECTION
-# =========================================================
+# ============================================================
 
 def choose_format(
-    mode: str,
-    quality: int,
-    audio_language: str
+    quality=1080,
+    audio_language=""
 ):
 
-    langs = [
+    height = int(quality)
 
-        x.strip().lower()
+    # Prefer H.264/AVC + AAC.
+    #
+    # Fallbacks are included so the downloader does not
+    # unnecessarily fail when a video does not expose
+    # an AVC/AAC combination.
 
-        for x in re.split(
-            r"[,;]+",
-            audio_language or ""
+    if audio_language:
+
+        audio_selector = (
+            f"bestaudio[language^={audio_language}]"
+            "/bestaudio"
         )
 
-        if x.strip()
+    else:
 
-    ]
-
-    # =====================================================
-    # AUDIO ONLY
-    # =====================================================
-
-    if mode == "audio":
-
-        alternatives = []
-
-        for lang in langs:
-
-            alternatives.append(
-                f"bestaudio"
-                f"[language^={lang}]"
-            )
-
-            alternatives.append(
-                f"bestaudio"
-                f"[language^={lang}]"
-                f"[acodec^=mp4a]"
-            )
-
-        alternatives.extend([
-
-            "bestaudio[acodec^=mp4a]",
-
-            "bestaudio",
-
-        ])
-
-        return "/".join(
-            dict.fromkeys(
-                alternatives
-            )
+        audio_selector = (
+            "bestaudio[acodec^=mp4a]"
+            "/bestaudio"
         )
 
-    # =====================================================
-    # VIDEO
-    # =====================================================
-
-    video = (
-
-        "bestvideo"
-
-        f"[height<={quality}]"
-
-        "[vcodec^=avc1]"
-
+    video_selector = (
+        f"bestvideo"
+        f"[vcodec^=avc1]"
+        f"[height<={height}]"
     )
 
-    progressive = (
-
-        "best"
-
-        f"[height<={quality}]"
-
-        "[vcodec^=avc1]"
-
+    fallback_video = (
+        f"bestvideo"
+        f"[height<={height}]"
     )
 
-    audio = []
-
-    for lang in langs:
-
-        audio.append(
-
-            f"bestaudio"
-            f"[language^={lang}]"
-            f"[acodec^=mp4a]"
-
-        )
-
-        audio.append(
-
-            f"bestaudio"
-            f"[language^={lang}]"
-
-        )
-
-    audio.extend([
-
-        "bestaudio[acodec^=mp4a]",
-
-        "bestaudio",
-
-    ])
-
-    pairs = [
-
-        f"{video}+{a}"
-
-        for a in dict.fromkeys(
-            audio
-        )
-
-    ]
-
-    return "/".join(
-
-        pairs
-        + [progressive]
-
+    return (
+        f"{video_selector}+{audio_selector}/"
+        f"{fallback_video}+{audio_selector}/"
+        f"best[height<={height}]/best"
     )
 
 
-# =========================================================
-# PROGRESS
-# =========================================================
+# ============================================================
+# JOB HELPERS
+# ============================================================
 
-def progress_hook(
+def update_job(
     job_id,
-    d
+    **values
 ):
 
     with jobs_lock:
 
-        job = jobs.get(
-            job_id
-        )
-
-        if not job:
-
+        if job_id not in jobs:
             return
 
-        status = d.get(
-            "status"
+        jobs[job_id].update(values)
+
+
+def progress_hook(data):
+
+    job_id = data.get(
+        "_smart_job_id"
+    )
+
+    if not job_id:
+        return
+
+    status = data.get(
+        "status"
+    )
+
+    if status == "downloading":
+
+        downloaded = data.get(
+            "downloaded_bytes",
+            0
         )
 
-        job["status"] = status
+        total = (
+            data.get("total_bytes")
+            or data.get("total_bytes_estimate")
+            or 0
+        )
 
-        # -------------------------------------------------
-        # DOWNLOADING
-        # -------------------------------------------------
+        percent = 0
 
-        if status == "downloading":
-
-            total = (
-
-                d.get(
-                    "total_bytes"
-                )
-
-                or
-
-                d.get(
-                    "total_bytes_estimate"
-                )
-
-                or 0
-
-            )
-
-            done = (
-
-                d.get(
-                    "downloaded_bytes"
-                )
-
-                or 0
-
-            )
+        if total:
 
             percent = (
+                downloaded / total
+            ) * 100
 
-                done / total * 100.0
+        speed = data.get(
+            "speed"
+        )
 
-                if total
+        eta = data.get(
+            "eta"
+        )
 
-                else 0.0
+        filename = data.get(
+            "filename",
+            ""
+        )
 
-            )
+        update_job(
 
-            job["percent"] = round(
+            job_id,
 
-                max(
+            status="downloading",
 
-                    0.0,
+            percent=round(
+                min(max(percent, 0), 100),
+                1
+            ),
 
-                    min(
-                        100.0,
-                        percent
-                    )
+            downloaded=format_bytes(
+                downloaded
+            ),
 
-                ),
+            total=format_bytes(
+                total
+            ),
 
-                2
+            speed=(
+                f"{format_bytes(speed)}/s"
+                if speed
+                else ""
+            ),
 
-            )
+            eta=(
+                f"{eta}s"
+                if eta is not None
+                else ""
+            ),
 
-            job["speed"] = (
+            filename=Path(
+                filename
+            ).name if filename else ""
 
-                d.get(
-                    "_speed_str"
-                )
+        )
 
-                or ""
+    elif status == "finished":
 
-            )
+        update_job(
 
-            job["eta"] = (
+            job_id,
 
-                d.get(
-                    "_eta_str"
-                )
+            status="processing",
 
-                or ""
+            percent=100
 
-            )
-
-            filename = (
-                d.get(
-                    "filename"
-                )
-                or ""
-            )
-
-            job["filename"] = (
-                Path(filename).name
-            )
-
-        # -------------------------------------------------
-        # FINISHED
-        # -------------------------------------------------
-
-        elif status == "finished":
-
-            job["percent"] = 100.0
-
-            job["speed"] = ""
-
-            job["eta"] = "00:00"
+        )
 
 
-# =========================================================
-# INFO
-# =========================================================
+# ============================================================
+# INFO EXTRACTION
+# ============================================================
 
-def get_info(
-    url: str,
-    flat=False
-):
+def get_info(url):
 
-    if not is_youtube_url(
-        url
-    ):
+    if not is_youtube_url(url):
 
-        raise HTTPException(
-            400,
-            "Only YouTube URLs are accepted."
+        raise ValueError(
+            "Please enter a valid YouTube URL."
         )
 
     opts = youtube_ydl_opts({
 
-        "skip_download": True,
+        "extract_flat": False,
 
-        "extract_flat": flat,
-
-        "noplaylist": not flat,
+        "noplaylist": True,
 
     })
 
-    try:
+    with yt_dlp.YoutubeDL(opts) as ydl:
 
-        with yt_dlp.YoutubeDL(
-            opts
-        ) as ydl:
-
-            return ydl.extract_info(
-
-                url,
-
-                download=False
-
-            )
-
-    except Exception as exc:
-
-        raise HTTPException(
-
-            400,
-
-            f"yt-dlp error: {exc}"
-
+        info = ydl.extract_info(
+            url,
+            download=False
         )
 
+    if not info:
 
-# =========================================================
-# SINGLE VIDEO
-# =========================================================
+        raise RuntimeError(
+            "Unable to extract video information."
+        )
+
+    return info
+
+
+def build_info_response(info):
+
+    formats = []
+
+    for fmt in info.get(
+        "formats",
+        []
+    ):
+
+        formats.append({
+
+            "format_id": fmt.get(
+                "format_id"
+            ),
+
+            "ext": fmt.get(
+                "ext"
+            ),
+
+            "height": fmt.get(
+                "height"
+            ),
+
+            "width": fmt.get(
+                "width"
+            ),
+
+            "fps": fmt.get(
+                "fps"
+            ),
+
+            "vcodec": fmt.get(
+                "vcodec"
+            ),
+
+            "acodec": fmt.get(
+                "acodec"
+            ),
+
+            "filesize": fmt.get(
+                "filesize"
+            ),
+
+            "filesize_approx": fmt.get(
+                "filesize_approx"
+            ),
+
+            "tbr": fmt.get(
+                "tbr"
+            ),
+
+            "language": fmt.get(
+                "language"
+            ),
+
+            "dynamic_range": fmt.get(
+                "dynamic_range"
+            ),
+
+        })
+
+    return {
+
+        "id": info.get(
+            "id"
+        ),
+
+        "title": info.get(
+            "title"
+        ),
+
+        "description": info.get(
+            "description"
+        ),
+
+        "channel": (
+            info.get("channel")
+            or info.get("uploader")
+        ),
+
+        "uploader": info.get(
+            "uploader"
+        ),
+
+        "duration": info.get(
+            "duration"
+        ),
+
+        "thumbnail": info.get(
+            "thumbnail"
+        ),
+
+        "webpage_url": info.get(
+            "webpage_url"
+        ),
+
+        "upload_date": info.get(
+            "upload_date"
+        ),
+
+        "view_count": info.get(
+            "view_count"
+        ),
+
+        "formats": formats,
+
+        "subtitles": list(
+            (info.get("subtitles") or {}).keys()
+        ),
+
+        "automatic_captions": list(
+            (
+                info.get(
+                    "automatic_captions"
+                )
+                or {}
+            ).keys()
+        ),
+
+    }
+
+
+# ============================================================
+# SINGLE VIDEO DOWNLOAD
+# ============================================================
 
 def run_single_video(
-
     job_id,
-
     url,
-
-    output_dir,
-
     mode,
-
     quality,
-
     audio_language,
-
-    fixed_basename=None,
-
-    playlist_index=None
-
+    output_dir
 ):
 
     output_dir.mkdir(
-
         parents=True,
-
         exist_ok=True
-
     )
-
-    # -----------------------------------------------------
-    # Metadata extraction
-    # -----------------------------------------------------
 
     info_opts = youtube_ydl_opts({
 
-        "skip_download": True,
+        "extract_flat": False,
 
         "noplaylist": True,
 
@@ -857,100 +698,40 @@ def run_single_video(
     ) as ydl:
 
         info = ydl.extract_info(
-
             url,
-
             download=False
-
         )
 
-    title = (
-        info.get("title")
-        or "video"
-    )
-
-    safe = safe_title(
-        title
-    )
-
-    # -----------------------------------------------------
-    # Output template
-    # -----------------------------------------------------
-
-    if fixed_basename:
-
-        template = str(
-
-            output_dir
-            / f"{fixed_basename}.%(ext)s"
-
+    title = safe_title(
+        info.get(
+            "title",
+            "download"
         )
-
-    else:
-
-        template = str(
-
-            output_dir
-            / "%(title)s.%(ext)s"
-
-        )
-
-    # -----------------------------------------------------
-    # yt-dlp options
-    # -----------------------------------------------------
-
-    opts = base_ydl_opts(
-        job_id
     )
-
-    opts.update({
-
-        "format":
-
-            choose_format(
-
-                mode,
-
-                quality,
-
-                audio_language
-
-            ),
-
-        "outtmpl":
-
-            template,
-
-        "noplaylist":
-
-            True,
-
-        "postprocessors":
-
-            [],
-
-        "embedmetadata":
-
-            True,
-
-        "writethumbnail":
-
-            False,
-
-    })
-
-    # =====================================================
-    # AUDIO
-    # =====================================================
 
     if mode == "audio":
 
+        final_template = str(
+            output_dir /
+            f"{title}.%(ext)s"
+        )
+
+        opts = base_ydl_opts(
+            job_id
+        )
+
         opts.update({
+
+            "outtmpl": final_template,
+
+            "format": (
+                "bestaudio[acodec^=mp4a]"
+                "/bestaudio"
+            ),
 
             "postprocessors": [
 
                 {
-
                     "key":
                         "FFmpegExtractAudio",
 
@@ -959,62 +740,86 @@ def run_single_video(
 
                     "preferredquality":
                         "0",
-
                 }
+
+            ],
+
+            "postprocessor_args": [
+                "-movflags",
+                "+faststart"
+            ],
+
+            "merge_output_format": "m4a",
+
+        })
+
+    else:
+
+        final_template = str(
+            output_dir /
+            f"{title}.%(ext)s"
+        )
+
+        opts = base_ydl_opts(
+            job_id
+        )
+
+        opts.update({
+
+            "outtmpl": final_template,
+
+            "format": choose_format(
+                quality,
+                audio_language
+            ),
+
+            "merge_output_format": "mp4",
+
+            "postprocessor_args": [
+
+                "-c:v",
+                "copy",
+
+                "-c:a",
+                "aac",
+
+                "-b:a",
+                "192k",
+
+                "-movflags",
+                "+faststart"
 
             ],
 
         })
 
-    # =====================================================
-    # VIDEO
-    # =====================================================
+    # Attach job ID to progress hook.
+    old_hooks = opts.get(
+        "progress_hooks",
+        []
+    )
 
-    else:
+    def job_progress(data):
 
-        opts[
-            "merge_output_format"
-        ] = "mp4"
+        data["_smart_job_id"] = job_id
 
-        opts[
-            "postprocessor_args"
-        ] = {
+        progress_hook(data)
 
-            "Merger+ffmpeg": [
+    opts["progress_hooks"] = [
+        job_progress
+    ]
 
-                "-c:v",
+    update_job(
 
-                "copy",
+        job_id,
 
-                "-c:a",
+        status="downloading",
 
-                "aac",
+        title=title,
 
-                "-b:a",
+        percent=0
 
-                "192k",
-
-            ]
-
-        }
-
-    # -----------------------------------------------------
-    # Job information
-    # -----------------------------------------------------
-
-    with jobs_lock:
-
-        jobs[job_id][
-            "title"
-        ] = title
-
-        jobs[job_id][
-            "playlist_index"
-        ] = playlist_index
-
-    # -----------------------------------------------------
-    # Download
-    # -----------------------------------------------------
+    )
 
     with yt_dlp.YoutubeDL(
         opts
@@ -1024,648 +829,618 @@ def run_single_video(
             url
         ])
 
-    # -----------------------------------------------------
-    # Find output files
-    # -----------------------------------------------------
+    files = []
 
-    files = [
+    for file in output_dir.iterdir():
 
-        p
+        if file.is_file():
 
-        for p in output_dir.iterdir()
+            files.append(file)
 
-        if (
+    if not files:
 
-            p.is_file()
+        raise RuntimeError(
+            "Download finished but no output file was found."
+        )
 
-            and not p.name.endswith(
+    # Select newest generated file.
+    result = max(
+        files,
+        key=lambda p: p.stat().st_mtime
+    )
 
+    update_job(
+
+        job_id,
+
+        status="completed",
+
+        percent=100,
+
+        file=str(result),
+
+        filename=result.name,
+
+        title=title
+
+    )
+
+    return result
+
+
+# ============================================================
+# PLAYLIST DOWNLOAD
+# ============================================================
+
+def run_playlist(
+    job_id,
+    url,
+    mode,
+    quality,
+    audio_language,
+    selected_indexes
+):
+
+    update_job(
+
+        job_id,
+
+        status="reading_playlist",
+
+        percent=0
+
+    )
+
+    opts = youtube_ydl_opts({
+
+        "extract_flat": True,
+
+        "skip_download": True,
+
+        "noplaylist": False,
+
+        "playlistend": MAX_PLAYLIST_ITEMS,
+
+    })
+
+    with yt_dlp.YoutubeDL(
+        opts
+    ) as ydl:
+
+        info = ydl.extract_info(
+            url,
+            download=False
+        )
+
+    entries = [
+        item
+        for item in (
+            info.get("entries")
+            or []
+        )
+        if item
+    ]
+
+    if not entries:
+
+        raise RuntimeError(
+            "No videos were found in the playlist."
+        )
+
+    if selected_indexes:
+
+        selected_set = {
+            int(x)
+            for x in selected_indexes
+        }
+
+        entries = [
+            item
+            for index, item in enumerate(
+                entries,
+                start=1
+            )
+            if index in selected_set
+        ]
+
+    entries = entries[
+        :MAX_PLAYLIST_ITEMS
+    ]
+
+    playlist_dir = (
+        DOWNLOAD_ROOT /
+        job_id /
+        "playlist"
+    )
+
+    playlist_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    downloaded_files = []
+
+    total = len(entries)
+
+    for position, item in enumerate(
+        entries,
+        start=1
+    ):
+
+        video_id = item.get(
+            "id"
+        )
+
+        video_url = (
+            item.get("url")
+            or item.get("webpage_url")
+            or (
+                f"https://www.youtube.com/watch?v={video_id}"
+                if video_id
+                else ""
+            )
+        )
+
+        if not video_url:
+
+            continue
+
+        numbered_name = (
+            f"{position:03d} - "
+            f"{safe_title(item.get('title', 'video'))}"
+        )
+
+        update_job(
+
+            job_id,
+
+            status="downloading",
+
+            current=position,
+
+            total=total,
+
+            percent=round(
                 (
+                    (position - 1)
+                    / total
+                ) * 100,
+                1
+            ),
 
-                    ".part",
-
-                    ".ytdl",
-
-                )
-
+            title=item.get(
+                "title"
             )
 
         )
 
-    ]
+        if mode == "audio":
 
-    # =====================================================
-    # PLAYLIST NAMING
-    # =====================================================
+            template = str(
+                playlist_dir /
+                f"{numbered_name}.%(ext)s"
+            )
 
-    if fixed_basename:
+            opts = base_ydl_opts(
+                job_id
+            )
 
-        desired_ext = (
+            opts.update({
 
-            ".m4a"
+                "outtmpl": template,
 
-            if mode == "audio"
+                "format": (
+                    "bestaudio[acodec^=mp4a]"
+                    "/bestaudio"
+                ),
 
-            else ".mp4"
+                "postprocessors": [
 
-        )
+                    {
+                        "key":
+                            "FFmpegExtractAudio",
 
-        desired = (
+                        "preferredcodec":
+                            "m4a",
 
-            output_dir
+                        "preferredquality":
+                            "0",
+                    }
 
-            / f"{fixed_basename}"
-              f"{desired_ext}"
-
-        )
-
-        if desired.exists():
-
-            return desired
-
-        matching = [
-
-            p
-
-            for p in files
-
-            if p.stem
-            == fixed_basename
-
-        ]
-
-        if matching:
-
-            return matching[0]
-
-    # =====================================================
-    # SINGLE VIDEO
-    # =====================================================
-
-    matching = [
-
-        p
-
-        for p in files
-
-        if p.stem == safe
-
-    ]
-
-    if matching:
-
-        return max(
-
-            matching,
-
-            key=lambda p:
-                p.stat().st_mtime
-
-        )
-
-    return (
-
-        max(
-
-            files,
-
-            key=lambda p:
-                p.stat().st_mtime
-
-        )
-
-        if files
-
-        else None
-
-    )
-
-
-# =========================================================
-# JOB EXECUTION
-# =========================================================
-
-def execute_job(
-    job_id,
-    request: DownloadRequest
-):
-
-    work_dir = (
-
-        DOWNLOAD_ROOT
-
-        / job_id
-
-    )
-
-    work_dir.mkdir(
-
-        parents=True,
-
-        exist_ok=True
-
-    )
-
-    try:
-
-        with job_semaphore:
-
-            with jobs_lock:
-
-                jobs[job_id][
-                    "state"
-                ] = "running"
-
-                jobs[job_id][
-                    "message"
-                ] = (
-                    "Preparing download…"
-                )
-
-            # =================================================
-            # PLAYLIST
-            # =================================================
-
-            if request.playlist:
-
-                info = get_info(
-
-                    request.url,
-
-                    flat=True
-
-                )
-
-                entries = [
-
-                    e
-
-                    for e in (
-
-                        info.get(
-                            "entries"
-                        )
-
-                        or []
-
-                    )
-
-                    if e
-
-                ]
-
-                if not entries:
-
-                    raise RuntimeError(
-
-                        "No downloadable playlist "
-                        "entries found."
-
-                    )
-
-                if (
-                    len(entries)
-                    > MAX_PLAYLIST_ITEMS
-                ):
-
-                    entries = entries[
-
-                        :MAX_PLAYLIST_ITEMS
-
-                    ]
-
-                selected = (
-
-                    request.selected_indexes
-
-                    or list(
-
-                        range(
-
-                            1,
-
-                            len(entries)
-                            + 1
-
-                        )
-
-                    )
-
-                )
-
-                selected = [
-
-                    i
-
-                    for i in selected
-
-                    if (
-
-                        1 <= i
-                        <= len(entries)
-
-                    )
-
-                ]
-
-                if not selected:
-
-                    raise RuntimeError(
-
-                        "No playlist items "
-                        "were selected."
-
-                    )
-
-                playlist_title = (
-
-                    info.get(
-                        "title"
-                    )
-
-                    or
-
-                    "YouTube Playlist"
-
-                )
-
-                with jobs_lock:
-
-                    jobs[job_id].update({
-
-                        "kind":
-                            "playlist",
-
-                        "playlist_title":
-                            playlist_title,
-
-                        "total":
-                            len(selected),
-
-                        "current":
-                            0,
-
-                    })
-
-                # -------------------------------------------------
-                # Playlist downloads
-                # -------------------------------------------------
-
-                for position, original_index in enumerate(
-
-                    selected,
-
-                    start=1
-
-                ):
-
-                    entry = (
-
-                        entries[
-                            original_index - 1
-                        ]
-
-                    )
-
-                    entry_url = (
-
-                        entry.get(
-                            "webpage_url"
-                        )
-
-                        or
-
-                        entry.get(
-                            "url"
-                        )
-
-                        or
-
-                        (
-
-                            "https://www.youtube.com/watch?v="
-
-                            + str(
-                                entry.get(
-                                    "id"
-                                )
-                            )
-
-                            if entry.get(
-                                "id"
-                            )
-
-                            else None
-
-                        )
-
-                    )
-
-                    if not entry_url:
-
-                        continue
-
-                    number = (
-
-                        f"{position:03d}"
-
-                    )
-
-                    with jobs_lock:
-
-                        jobs[job_id].update({
-
-                            "current":
-                                position,
-
-                            "percent":
-                                0,
-
-                            "message":
-
-                                (
-
-                                    "Downloading playlist "
-                                    f"item {number}/"
-                                    f"{len(selected):03d}"
-
-                                ),
-
-                        })
-
-                    run_single_video(
-
-                        job_id,
-
-                        entry_url,
-
-                        work_dir,
-
-                        request.mode,
-
-                        request.quality,
-
-                        request.audio_language,
-
-                        fixed_basename=
-                            number,
-
-                        playlist_index=
-                            original_index,
-
-                    )
-
-                # -------------------------------------------------
-                # ZIP playlist
-                # -------------------------------------------------
-
-                archive = shutil.make_archive(
-
-                    str(
-
-                        DOWNLOAD_ROOT
-
-                        / f"{job_id}_playlist"
-
-                    ),
-
-                    "zip",
-
-                    root_dir=work_dir
-
-                )
-
-                with jobs_lock:
-
-                    jobs[job_id].update({
-
-                        "state":
-                            "completed",
-
-                        "message":
-
-                            (
-
-                                "Playlist complete: "
-
-                                f"{len(selected)} item(s)."
-
-                            ),
-
-                        "percent":
-                            100,
-
-                        "file":
-                            archive,
-
-                        "filename":
-
-                            (
-
-                                f"{safe_title(playlist_title)}"
-                                ".zip"
-
-                            ),
-
-                    })
-
-            # =================================================
-            # SINGLE DOWNLOAD
-            # =================================================
-
-            else:
-
-                with jobs_lock:
-
-                    jobs[job_id].update({
-
-                        "kind":
-                            "single",
-
-                        "total":
-                            1,
-
-                        "current":
-                            1,
-
-                        "percent":
-                            0,
-
-                        "message":
-                            "Downloading…",
-
-                    })
-
-                result = run_single_video(
-
-                    job_id,
-
-                    request.url,
-
-                    work_dir,
-
-                    request.mode,
-
-                    request.quality,
-
-                    request.audio_language,
-
-                )
-
-                if (
-
-                    not result
-
-                    or not result.exists()
-
-                ):
-
-                    raise RuntimeError(
-
-                        "The download completed "
-                        "but no output file "
-                        "was found."
-
-                    )
-
-                final_path = (
-
-                    DOWNLOAD_ROOT
-
-                    / f"{job_id}_{result.name}"
-
-                )
-
-                shutil.move(
-
-                    str(result),
-
-                    str(final_path)
-
-                )
-
-                with jobs_lock:
-
-                    jobs[job_id].update({
-
-                        "state":
-                            "completed",
-
-                        "message":
-                            "Download complete.",
-
-                        "percent":
-                            100,
-
-                        "file":
-                            str(final_path),
-
-                        "filename":
-                            result.name,
-
-                    })
-
-    except Exception as exc:
-
-        with jobs_lock:
-
-            jobs[job_id].update({
-
-                "state":
-                    "failed",
-
-                "message":
-                    str(exc),
-
-                "error":
-                    str(exc),
+                ],
 
             })
 
+        else:
 
-# =========================================================
-# HOME
-# =========================================================
+            template = str(
+                playlist_dir /
+                f"{numbered_name}.%(ext)s"
+            )
+
+            opts = base_ydl_opts(
+                job_id
+            )
+
+            opts.update({
+
+                "outtmpl": template,
+
+                "format": choose_format(
+                    quality,
+                    audio_language
+                ),
+
+                "merge_output_format":
+                    "mp4",
+
+                "postprocessor_args": [
+
+                    "-c:a",
+                    "aac",
+
+                    "-b:a",
+                    "192k",
+
+                    "-movflags",
+                    "+faststart"
+
+                ],
+
+            })
+
+        def playlist_progress(
+            data,
+            jid=job_id,
+            pos=position,
+            count=total
+        ):
+
+            data["_smart_job_id"] = jid
+
+            if data.get(
+                "status"
+            ) == "downloading":
+
+                downloaded = data.get(
+                    "downloaded_bytes",
+                    0
+                )
+
+                total_bytes = (
+                    data.get(
+                        "total_bytes"
+                    )
+                    or data.get(
+                        "total_bytes_estimate"
+                    )
+                    or 0
+                )
+
+                item_percent = 0
+
+                if total_bytes:
+
+                    item_percent = (
+                        downloaded /
+                        total_bytes
+                    ) * 100
+
+                overall = (
+                    (
+                        (pos - 1)
+                        + item_percent / 100
+                    )
+                    / count
+                ) * 100
+
+                update_job(
+
+                    jid,
+
+                    status="downloading",
+
+                    current=pos,
+
+                    total=count,
+
+                    percent=round(
+                        overall,
+                        1
+                    ),
+
+                    downloaded=format_bytes(
+                        downloaded
+                    ),
+
+                    speed=(
+                        f"{format_bytes(data.get('speed'))}/s"
+                        if data.get("speed")
+                        else ""
+                    ),
+
+                    eta=(
+                        f"{data.get('eta')}s"
+                        if data.get("eta") is not None
+                        else ""
+                    )
+
+                )
+
+        opts["progress_hooks"] = [
+            playlist_progress
+        ]
+
+        with yt_dlp.YoutubeDL(
+            opts
+        ) as ydl:
+
+            ydl.download([
+                video_url
+            ])
+
+        generated = [
+            file
+            for file in playlist_dir.iterdir()
+            if file.is_file()
+        ]
+
+        if generated:
+
+            newest = max(
+                generated,
+                key=lambda p: p.stat().st_mtime
+            )
+
+            downloaded_files.append(
+                newest
+            )
+
+    if not downloaded_files:
+
+        raise RuntimeError(
+            "Playlist download completed but no files were created."
+        )
+
+    # Create ZIP archive.
+    zip_path = (
+        DOWNLOAD_ROOT /
+        job_id /
+        "playlist_download.zip"
+    )
+
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+
+        for file in downloaded_files:
+
+            archive.write(
+                file,
+                arcname=file.name
+            )
+
+    update_job(
+
+        job_id,
+
+        status="completed",
+
+        percent=100,
+
+        file=str(zip_path),
+
+        filename=zip_path.name,
+
+        count=len(downloaded_files)
+
+    )
+
+    return zip_path
+
+
+# ============================================================
+# JOB EXECUTION
+# ============================================================
+
+def execute_job(
+    job_id,
+    request
+):
+
+    global active_jobs
+
+    with active_jobs_lock:
+
+        active_jobs += 1
+
+    try:
+
+        update_job(
+
+            job_id,
+
+            status="starting",
+
+            percent=0,
+
+            error=None
+
+        )
+
+        url = request.url.strip()
+
+        job_dir = (
+            DOWNLOAD_ROOT /
+            job_id
+        )
+
+        job_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        if request.playlist:
+
+            result = run_playlist(
+
+                job_id=job_id,
+
+                url=url,
+
+                mode=request.mode,
+
+                quality=request.quality,
+
+                audio_language=(
+                    request.audio_language
+                    or ""
+                ),
+
+                selected_indexes=(
+                    request.selected_indexes
+                    or []
+                )
+
+            )
+
+        else:
+
+            result = run_single_video(
+
+                job_id=job_id,
+
+                url=url,
+
+                mode=request.mode,
+
+                quality=request.quality,
+
+                audio_language=(
+                    request.audio_language
+                    or ""
+                ),
+
+                output_dir=job_dir
+
+            )
+
+        update_job(
+
+            job_id,
+
+            status="completed",
+
+            percent=100,
+
+            file=str(result),
+
+            filename=Path(
+                result
+            ).name
+
+        )
+
+    except Exception as exc:
+
+        update_job(
+
+            job_id,
+
+            status="error",
+
+            error=str(exc)
+
+        )
+
+    finally:
+
+        with active_jobs_lock:
+
+            active_jobs -= 1
+
+
+# ============================================================
+# ROUTES
+# ============================================================
 
 @app.get(
     "/",
     response_class=HTMLResponse
 )
-async def home():
+async def index():
 
-    return (
+    index_file = (
+        STATIC_DIR /
+        "index.html"
+    )
 
-        BASE_DIR
+    if not index_file.exists():
 
-        / "static"
+        return HTMLResponse(
+            f"""
+            <!doctype html>
+            <html>
+            <head>
+                <title>{APP_NAME}</title>
+            </head>
+            <body>
+                <h1>{APP_NAME}</h1>
+                <p>Frontend file is missing.</p>
+            </body>
+            </html>
+            """,
+            status_code=500
+        )
 
-        / "index.html"
-
-    ).read_text(
+    return index_file.read_text(
         encoding="utf-8"
     )
 
 
-# =========================================================
-# VIDEO INFO
-# =========================================================
+# ============================================================
+# INFO API
+# ============================================================
 
-@app.get(
+@app.post(
     "/api/info"
 )
 async def api_info(
-    url: str
+    request: DownloadRequest
 ):
 
-    info = get_info(
+    url = request.url.strip()
 
-        url,
+    if not url:
 
-        flat=False
+        raise HTTPException(
+            400,
+            "YouTube URL is required."
+        )
 
-    )
+    try:
 
-    return {
+        info = get_info(
+            url
+        )
 
-        "id":
-            info.get("id"),
+        return build_info_response(
+            info
+        )
 
-        "title":
-            info.get("title"),
+    except Exception as exc:
 
-        "channel":
-            (
-
-                info.get(
-                    "channel"
-                )
-
-                or
-
-                info.get(
-                    "uploader"
-                )
-
-            ),
-
-        "duration":
-            info.get("duration"),
-
-        "thumbnail":
-            info.get("thumbnail"),
-
-        "height":
-            info.get("height"),
-
-        "view_count":
-            info.get("view_count"),
-
-    }
+        raise HTTPException(
+            400,
+            f"Unable to extract video information: {exc}"
+        )
 
 
-# =========================================================
-# SEARCH
-# =========================================================
+# ============================================================
+# SEARCH API
+# ============================================================
 
 @app.post(
     "/api/search"
@@ -1679,20 +1454,26 @@ async def api_search(
     if not query:
 
         raise HTTPException(
-
             400,
-
             "Enter a search term."
-
         )
+
+    search_limit = min(
+        request.limit,
+        MAX_SEARCH_RESULTS
+    )
+
+    search_query = (
+        f"ytsearch{search_limit}:{query}"
+    )
 
     opts = youtube_ydl_opts({
 
-        "extract_flat":
-            True,
+        "extract_flat": True,
 
-        "skip_download":
-            True,
+        "skip_download": True,
+
+        "noplaylist": False,
 
     })
 
@@ -1703,48 +1484,25 @@ async def api_search(
         ) as ydl:
 
             data = ydl.extract_info(
-
-                (
-
-                    "ytsearch"
-
-                    f"{min("
-                        request.limit,
-                        MAX_SEARCH_RESULTS
-                    )}:"
-
-                    f"{query}"
-
-                ),
-
+                search_query,
                 download=False
-
             )
 
     except Exception as exc:
 
         raise HTTPException(
-
             400,
-
             f"Search failed: {exc}"
-
         )
 
     results = []
 
     for item in (
-
-        data.get(
-            "entries"
-        )
-
+        data.get("entries")
         or []
-
     ):
 
         if not item:
-
             continue
 
         vid = item.get(
@@ -1752,226 +1510,166 @@ async def api_search(
         )
 
         url = (
-
-            item.get(
-                "webpage_url"
-            )
-
-            or
-
-            (
-
+            item.get("webpage_url")
+            or (
                 f"https://www.youtube.com/watch?v={vid}"
-
                 if vid
-
                 else ""
-
             )
-
         )
 
         results.append({
 
-            "id":
-                vid,
+            "id": vid,
 
-            "title":
-                item.get("title"),
+            "title": item.get(
+                "title"
+            ),
 
-            "channel":
-                (
+            "channel": (
+                item.get("channel")
+                or item.get("uploader")
+            ),
 
-                    item.get(
-                        "channel"
-                    )
+            "duration": item.get(
+                "duration"
+            ),
 
-                    or
+            "url": url,
 
-                    item.get(
-                        "uploader"
-                    )
-
-                ),
-
-            "duration":
-                item.get("duration"),
-
-            "url":
-                url,
-
-            "thumbnail":
-
-                (
-
-                    f"https://i.ytimg.com/vi/"
-                    f"{vid}/mqdefault.jpg"
-
-                    if vid
-
-                    else ""
-
-                ),
+            "thumbnail": (
+                f"https://i.ytimg.com/vi/"
+                f"{vid}/mqdefault.jpg"
+                if vid
+                else ""
+            ),
 
         })
 
     return {
-
-        "results":
-            results
-
+        "results": results
     }
 
 
-# =========================================================
-# PLAYLIST
-# =========================================================
+# ============================================================
+# PLAYLIST INFO
+# ============================================================
 
-@app.get(
+@app.post(
     "/api/playlist"
 )
 async def api_playlist(
-    url: str
+    request: DownloadRequest
 ):
 
-    info = get_info(
+    url = request.url.strip()
 
-        url,
+    if not url:
 
-        flat=True
+        raise HTTPException(
+            400,
+            "Playlist URL is required."
+        )
 
-    )
+    opts = youtube_ydl_opts({
+
+        "extract_flat": True,
+
+        "skip_download": True,
+
+        "noplaylist": False,
+
+        "playlistend": MAX_PLAYLIST_ITEMS,
+
+    })
+
+    try:
+
+        with yt_dlp.YoutubeDL(
+            opts
+        ) as ydl:
+
+            data = ydl.extract_info(
+                url,
+                download=False
+            )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            400,
+            f"Playlist extraction failed: {exc}"
+        )
 
     entries = []
 
     for index, item in enumerate(
-
-        info.get(
-            "entries"
-        )
-
-        or [],
-
+        data.get("entries") or [],
         start=1
-
     ):
 
         if not item:
-
             continue
 
         vid = item.get(
             "id"
         )
 
-        entry_url = (
-
-            item.get(
-                "webpage_url"
-            )
-
-            or
-
-            item.get(
-                "url"
-            )
-
-            or
-
-            (
-
+        video_url = (
+            item.get("webpage_url")
+            or (
                 f"https://www.youtube.com/watch?v={vid}"
-
                 if vid
-
                 else ""
-
             )
-
         )
-
-        if not entry_url:
-
-            continue
 
         entries.append({
 
-            "index":
-                index,
+            "index": index,
 
-            "title":
+            "id": vid,
 
-                (
+            "title": item.get(
+                "title"
+            ),
 
-                    item.get(
-                        "title"
-                    )
+            "url": video_url,
 
-                    or
+            "duration": item.get(
+                "duration"
+            ),
 
-                    f"Video {index}"
-
-                ),
-
-            "duration":
-                item.get("duration"),
-
-            "url":
-                entry_url,
-
-            "id":
-                vid,
-
-            "thumbnail":
-
-                (
-
-                    f"https://i.ytimg.com/vi/"
-                    f"{vid}/mqdefault.jpg"
-
-                    if vid
-
-                    else ""
-
-                ),
+            "thumbnail": (
+                f"https://i.ytimg.com/vi/"
+                f"{vid}/mqdefault.jpg"
+                if vid
+                else ""
+            ),
 
         })
 
-        if (
-            len(entries)
-            >= MAX_PLAYLIST_ITEMS
-        ):
-
-            break
-
     return {
 
-        "title":
+        "title": data.get(
+            "title"
+        ),
 
-            (
+        "channel": (
+            data.get("channel")
+            or data.get("uploader")
+        ),
 
-                info.get(
-                    "title"
-                )
+        "count": len(entries),
 
-                or
-
-                "YouTube Playlist"
-
-            ),
-
-        "count":
-            len(entries),
-
-        "entries":
-            entries,
+        "entries": entries,
 
     }
 
 
-# =========================================================
+# ============================================================
 # START DOWNLOAD
-# =========================================================
+# ============================================================
 
 @app.post(
     "/api/download"
@@ -1980,45 +1678,36 @@ async def api_download(
     request: DownloadRequest
 ):
 
+    global active_jobs
+
+    if not request.url.strip():
+
+        raise HTTPException(
+            400,
+            "URL is required."
+        )
+
     if not is_youtube_url(
         request.url
     ):
 
         raise HTTPException(
-
             400,
-
-            "Only YouTube URLs are accepted."
-
+            "Only YouTube URLs are supported."
         )
 
-    if (
+    with active_jobs_lock:
 
-        request.playlist
+        if active_jobs >= MAX_CONCURRENT_JOBS:
 
-        and
+            raise HTTPException(
 
-        len(
-            request.selected_indexes
-        )
+                429,
 
-        > MAX_PLAYLIST_ITEMS
-
-    ):
-
-        raise HTTPException(
-
-            400,
-
-            (
-
-                f"At most "
-                f"{MAX_PLAYLIST_ITEMS} "
-                f"playlist items can be selected."
+                "Server is currently busy. "
+                "Please try again shortly."
 
             )
-
-        )
 
     job_id = uuid.uuid4().hex
 
@@ -2026,35 +1715,31 @@ async def api_download(
 
         jobs[job_id] = {
 
-            "id":
-                job_id,
+            "id": job_id,
 
-            "state":
-                "queued",
+            "status": "queued",
 
-            "kind":
+            "percent": 0,
 
-                (
+            "downloaded": "0 B",
 
-                    "playlist"
+            "total": "0 B",
 
-                    if request.playlist
+            "speed": "",
 
-                    else "single"
+            "eta": "",
 
-                ),
+            "filename": "",
 
-            "percent":
-                0,
+            "file": "",
 
-            "speed":
-                "",
+            "error": None,
 
-            "eta":
-                "",
+            "title": "",
 
-            "message":
-                "Queued…",
+            "current": 0,
+
+            "count": 0,
 
         }
 
@@ -2063,14 +1748,11 @@ async def api_download(
         target=execute_job,
 
         args=(
-
             job_id,
-
             request
-
         ),
 
-        daemon=True,
+        daemon=True
 
     )
 
@@ -2078,45 +1760,45 @@ async def api_download(
 
     return {
 
-        "job_id":
-            job_id
+        "job_id": job_id,
+
+        "status": "queued"
 
     }
 
 
-# =========================================================
+# ============================================================
 # JOB STATUS
-# =========================================================
+# ============================================================
 
 @app.get(
     "/api/jobs/{job_id}"
 )
-async def api_job(
+async def api_job_status(
     job_id: str
 ):
 
     with jobs_lock:
 
-        data = jobs.get(
+        job = jobs.get(
             job_id
         )
 
-    if not data:
+        if not job:
 
-        raise HTTPException(
+            raise HTTPException(
+                404,
+                "Job not found."
+            )
 
-            404,
-
-            "Job not found."
-
+        return dict(
+            job
         )
 
-    return data
 
-
-# =========================================================
-# DOWNLOAD FILE
-# =========================================================
+# ============================================================
+# DOWNLOAD RESULT FILE
+# ============================================================
 
 @app.get(
     "/api/jobs/{job_id}/file"
@@ -2127,91 +1809,75 @@ async def api_job_file(
 
     with jobs_lock:
 
-        data = jobs.get(
+        job = jobs.get(
             job_id
         )
 
-    if (
+        if not job:
 
-        not data
+            raise HTTPException(
+                404,
+                "Job not found."
+            )
 
-        or
-
-        data.get(
-            "state"
+        file_path = job.get(
+            "file"
         )
 
-        != "completed"
-
-    ):
+    if not file_path:
 
         raise HTTPException(
-
             404,
-
-            "Completed file not available yet."
-
+            "File is not ready."
         )
 
-    path = data.get(
-        "file"
+    path = Path(
+        file_path
     )
 
-    if (
-
-        not path
-
-        or
-
-        not Path(path).is_file()
-
-    ):
+    if not path.exists():
 
         raise HTTPException(
-
             404,
-
             "Output file no longer exists."
-
         )
 
     return FileResponse(
-
-        path,
-
-        filename=(
-
-            data.get(
-                "filename"
-            )
-
-            or
-
-            Path(path).name
-
-        ),
-
-        media_type=
-            "application/octet-stream",
-
+        path=str(path),
+        filename=path.name,
+        media_type="application/octet-stream"
     )
 
 
-# =========================================================
-# HEALTH
-# =========================================================
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get(
     "/api/health"
 )
-async def health():
+async def api_health():
 
-    deno_path = get_deno_path()
+    deno = get_deno()
 
-    ffmpeg_path = get_ffmpeg_path()
+    ffmpeg = shutil.which(
+        "ffmpeg"
+    )
 
-    # Check EJS package without making
-    # the whole application fail if unavailable.
+    ffprobe = shutil.which(
+        "ffprobe"
+    )
+
+    try:
+
+        ytdlp_version = (
+            yt_dlp.version.__version__
+        )
+
+    except Exception:
+
+        ytdlp_version = "unknown"
+
     try:
 
         import yt_dlp_ejs
@@ -2224,28 +1890,104 @@ async def health():
 
     return {
 
-        "ok":
-            True,
+        "status": "ok",
 
-        "ffmpeg":
-            bool(ffmpeg_path),
+        "app": APP_NAME,
 
-        "ffmpeg_path":
-            ffmpeg_path,
+        "yt_dlp": ytdlp_version,
 
-        "deno":
-            bool(deno_path),
+        "deno": bool(deno),
 
-        "deno_path":
-            deno_path,
+        "deno_path": deno or "",
 
-        "yt_dlp":
-            True,
+        "ffmpeg": bool(ffmpeg),
 
-        "yt_dlp_version":
-            yt_dlp.version.__version__,
+        "ffmpeg_path": ffmpeg or "",
 
-        "yt_dlp_ejs":
-            ejs_available,
+        "ffprobe": bool(ffprobe),
+
+        "ffprobe_path": ffprobe or "",
+
+        "yt_dlp_ejs": ejs_available,
+
+        "max_playlist_items":
+            MAX_PLAYLIST_ITEMS,
+
+        "max_search_results":
+            MAX_SEARCH_RESULTS,
+
+        "max_concurrent_jobs":
+            MAX_CONCURRENT_JOBS,
 
     }
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+@app.on_event(
+    "startup"
+)
+async def startup_event():
+
+    DOWNLOAD_ROOT.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    print("=" * 60)
+
+    print(APP_NAME)
+
+    print("=" * 60)
+
+    print(
+        "yt-dlp:",
+        getattr(
+            yt_dlp.version,
+            "__version__",
+            "unknown"
+        )
+    )
+
+    print(
+        "Deno:",
+        get_deno() or "NOT FOUND"
+    )
+
+    print(
+        "FFmpeg:",
+        shutil.which(
+            "ffmpeg"
+        ) or "NOT FOUND"
+    )
+
+    print(
+        "FFprobe:",
+        shutil.which(
+            "ffprobe"
+        ) or "NOT FOUND"
+    )
+
+    try:
+
+        import yt_dlp_ejs
+
+        print(
+            "yt-dlp-ejs: OK"
+        )
+
+    except Exception as exc:
+
+        print(
+            "yt-dlp-ejs: NOT AVAILABLE",
+            exc
+        )
+
+    print(
+        "Download directory:",
+        DOWNLOAD_ROOT
+    )
+
+    print("=" * 60)
