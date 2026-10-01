@@ -228,13 +228,10 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-# Cloud IP block/429 se bachne ke liye fallback strategies zaroori hain.
+
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("default", None),                      # Pehle default try karega
-    ("ios", ["ios"]),                       # Agar 429 block hua toh iOS spoof
-    ("android", ["android"]),               # Agar ios fail toh Android spoof
-    ("tv", ["tv"]),                         # TV spoof
-    ("web_embedded", ["web_embedded"]),     # Embedded spoof
+    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
+    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
 ]
 
 
@@ -266,13 +263,11 @@ def youtube_ydl_opts(
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        
+        "ffmpeg_location": get_ffmpeg(),
+        "noplaylist": not playlist,
         "sleep_interval_requests": 2,
         "sleep_interval": 2,
         "max_sleep_interval": 5,
-        
-        "ffmpeg_location": get_ffmpeg(),
-        "noplaylist": not playlist,
     }
     
     opts = add_youtube_runtime_options(opts)
@@ -301,11 +296,6 @@ def base_ydl_opts(job_id):
         "fragment_retries": 5,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        
-        "sleep_interval_requests": 2,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
-        
         "ffmpeg_location": get_ffmpeg(),
         "progress_hooks": [
             progress_hook
@@ -319,6 +309,9 @@ def base_ydl_opts(job_id):
         "continuedl": True,
         "nopart": False,
         "noprogress": True,
+        "sleep_interval_requests": 2,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
     }
     
     opts = add_youtube_runtime_options(opts)
@@ -402,7 +395,7 @@ def extract_youtube_info(
         
     errors = []
     
-    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
+    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
             print(f"[YT] Trying strategy: {strategy_name}")
             
@@ -415,12 +408,8 @@ def extract_youtube_info(
                 playlist=allow_playlist
             )
             
-            if player_clients:
-                opts["extractor_args"] = {
-                    "youtube": {
-                        "player_client": player_clients
-                    }
-                }
+            if strategy_kwargs:
+                opts.update(strategy_kwargs)
             
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(
@@ -459,7 +448,7 @@ def extract_youtube_search(
 ):
     errors = []
     
-    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
+    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
             print(f"[SEARCH] Trying strategy: {strategy_name}")
             
@@ -472,12 +461,8 @@ def extract_youtube_search(
                 playlist=True
             )
             
-            if player_clients:
-                opts["extractor_args"] = {
-                    "youtube": {
-                        "player_client": player_clients
-                    }
-                }
+            if strategy_kwargs:
+                opts.update(strategy_kwargs)
             
             with yt_dlp.YoutubeDL(opts) as ydl:
                 data = ydl.extract_info(
@@ -514,18 +499,14 @@ def download_with_fallback(
 ):
     errors = []
     
-    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
+    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
             print(f"[DOWNLOAD] Trying strategy: {strategy_name}")
             
             opts = opts_factory()
             
-            if player_clients:
-                opts["extractor_args"] = {
-                    "youtube": {
-                        "player_client": player_clients
-                    }
-                }
+            if strategy_kwargs:
+                opts.update(strategy_kwargs)
             
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
