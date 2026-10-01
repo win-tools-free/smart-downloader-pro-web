@@ -1,4 +1,4 @@
-```dockerfile
+
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -43,4 +43,4 @@ RUN deno --version \
 EXPOSE 10000
 
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
-```
+
