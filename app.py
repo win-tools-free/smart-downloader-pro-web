@@ -180,7 +180,11 @@ def youtube_ydl_opts(extra=None):
         "socket_timeout": 30,
 
         # Current YouTube JS challenge support.
-        "js_runtimes": f"deno:{deno_path}",
+        "js_runtimes": {
+            "deno": {
+               "path": deno_path
+         }
+    },
 
         # Get the EJS challenge scripts from GitHub.
         "remote_components": "ejs:github",
