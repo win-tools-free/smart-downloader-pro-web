@@ -1,4 +1,6 @@
 import os
+import urllib.request
+import urllib.error
 import re
 import shutil
 import threading
@@ -228,14 +230,10 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-# Render/Cloud IP 429 limits ko bypass karne ke liye mobile clients sabse best hain
+
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"]}}}),
-    ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
-    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
     ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
     ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
-    ("default", None),
 ]
 
 
@@ -267,11 +265,19 @@ def youtube_ydl_opts(
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        "ffmpeg_location": get_ffmpeg(),
-        "noplaylist": not playlist,
         "sleep_interval_requests": 2,
         "sleep_interval": 2,
         "max_sleep_interval": 5,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "ffmpeg_location": get_ffmpeg(),
+        "noplaylist": not playlist,
     }
     
     opts = add_youtube_runtime_options(opts)
@@ -300,6 +306,17 @@ def base_ydl_opts(job_id):
         "fragment_retries": 5,
         "extractor_retries": 3,
         "socket_timeout": 30,
+        "sleep_interval_requests": 2,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
         "ffmpeg_location": get_ffmpeg(),
         "progress_hooks": [
             progress_hook
@@ -313,9 +330,6 @@ def base_ydl_opts(job_id):
         "continuedl": True,
         "nopart": False,
         "noprogress": True,
-        "sleep_interval_requests": 2,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
     }
     
     opts = add_youtube_runtime_options(opts)
@@ -1953,6 +1967,64 @@ async def api_health():
         "download_methods": [
             "POST"
         ],
+    }
+
+# ============================================================
+# YOUTUBE TEST ENDPOINT
+# ============================================================
+
+@app.get("/api/youtube-test")
+def youtube_test():
+    results = {}
+    
+    urls = {
+        "youtube_home": "https://www.youtube.com/",
+        "youtube_watch": "https://www.youtube.com/watch?v=62WUWa29iDE",
+    }
+    
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    
+    for name, url in urls.items():
+        try:
+            request = urllib.request.Request(
+                url,
+                headers=headers,
+                method="GET",
+            )
+            
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = response.read(512)
+                
+                results[name] = {
+                    "ok": True,
+                    "status": response.status,
+                    "content_type": response.headers.get("Content-Type"),
+                    "sample_bytes": len(data),
+                }
+                
+        except urllib.error.HTTPError as e:
+            results[name] = {
+                "ok": False,
+                "status": e.code,
+                "reason": str(e.reason),
+            }
+            
+        except Exception as e:
+            results[name] = {
+                "ok": False,
+                "error": str(e),
+            }
+            
+    return {
+        "status": "ok",
+        "tests": results,
     }
 
 
