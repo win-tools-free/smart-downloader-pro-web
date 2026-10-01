@@ -1,4 +1,3 @@
-```python
 import os
 import re
 import shutil
@@ -1378,4 +1377,4 @@ async def health():
             yt_dlp.version.__version__,
 
     }
-```
+    
