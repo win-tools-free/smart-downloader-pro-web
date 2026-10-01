@@ -254,11 +254,9 @@ def add_bypass_options(opts):
         }
     opts["remote_components"] = ["ejs:github"]
     
-    # 2. TLS Impersonation (Bypasses YouTube 429 fingerprint blocks)
-    # Ab curl_cffi install ho gaya hai, toh ye bina error ke chalega aur block se bachayega!
-    opts["impersonate"] = "chrome"
+    # Impersonate removed because curl_cffi compilation fails on Render
     
-    # 3. Automatic Cookie Detection (The ultimate fallback)
+    # 2. Automatic Cookie Detection (The ultimate fallback for 429 errors)
     cookie_path = BASE_DIR / "cookies.txt"
     if cookie_path.exists():
         opts["cookiefile"] = str(cookie_path)
