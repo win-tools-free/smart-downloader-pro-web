@@ -1,1 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Downloader Pro Web</title>
+<style>
+:root{
+  --bg:#0b1020; --sidebar:#101a33; --card:#17233f; --input:#1c2a4a;
+  --accent:#5b8cff; --accent2:#7aa2ff; --text:#fff; --muted:#8d9bb0;
+  --border:#314a78; --ok:#22c55e; --danger:#f87171;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+button,input,select{font:inherit}
+button{cursor:pointer}
+.app{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
+.side{background:var(--sidebar);padding:24px 14px;position:sticky;top:0;height:100vh}
+.logo{font-size:22px;font-weight:800;margin:7px 8px 28px}
+.nav{display:block;width:100%;padding:12px;border:0;border-radius:10px;background:transparent;color:#c9d4e5;text-align:left;margin:5px 0}
+.nav.active,.nav:hover{background:#243b68;color:#fff}
+.main{padding:28px;max-width:1400px;width:100%;margin:auto}
+h1{margin:0 0 8px;font-size:32px}
+.sub{color:var(--muted);margin-bottom:22px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:18px;margin:14px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.grow{flex:1}
+input,select{background:var(--input);color:#fff;border:1px solid var(--border);border-radius:10px;padding:12px}
+input{width:100%}
+button.primary{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:12px 18px}
+button.ok{background:var(--ok);color:#04120a;border:0;border-radius:10px;padding:12px 18px;font-weight:700}
+button.secondary{background:var(--input);color:#fff;border:1px solid var(--border);border-radius:10px;padding:11px 16px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.item{background:var(--input);border:1px solid var(--border);border-radius:12px;padding:10px}
+.item img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:#111}
+.item h3{font-size:14px;line-height:1.3;margin:8px 0 4px}
+.muted{color:var(--muted);font-size:12px}
+.hidden{display:none}
+progress{width:100%;height:14px}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#263e7a;color:#dce7ff;font-size:12px}
+.results-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}
+.notice{padding:10px 12px;border-radius:10px;background:#102242;color:#d7e6ff}
+.error{background:#3a1720;color:#ffd5dc}
+.success{background:#10331f;color:#c7f8d6}
+@media(max-width:900px){
+  .app{grid-template-columns:1fr}
+  .side{position:static;height:auto;display:flex;gap:6px;overflow:auto;align-items:center}
+  .logo{white-space:nowrap;margin:0 8px}
+  .nav{width:auto;white-space:nowrap}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){.grid{grid-template-columns:1fr}.main{padding:16px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">▶ Smart Downloader</div>
+    <button class="nav active" data-tab="downloader">⬇ Downloader</button>
+    <button class="nav" data-tab="search">⌕ Search</button>
+    <button class="nav" data-tab="playlist">☷ Playlist</button>
+  </aside>
+
+  <main class="main">
+    <section id="downloader" class="tab">
+      <h1>YouTube Downloader</h1>
+      <div class="sub">Paste a YouTube URL. Single downloads keep the YouTube title; playlists use 001, 002, 003… numbering.</div>
+
+      <div class="card">
+        <div class="row">
+          <div class="grow"><input id="url" placeholder="https://www.youtube.com/watch?v=..."></div>
+          <button class="secondary" onclick="preview()">Preview</button>
+          <button class="secondary" onclick="loadPlaylist()">Scan Playlist</button>
+        </div>
+      </div>
+
+      <div id="previewCard" class="card hidden">
+        <div class="row">
+          <img id="previewImage" style="width:240px;max-width:35%;border-radius:10px">
+          <div class="grow">
+            <h2 id="previewTitle"></h2>
+            <div id="previewMeta" class="muted"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label>Type
+            <select id="mode">
+              <option value="video">Video MP4</option>
+              <option value="audio">Audio M4A</option>
+            </select>
+          </label>
+          <label>Quality
+            <select id="quality">
+              <option>2160</option><option>1440</option><option selected>1080</option>
+              <option>720</option><option>480</option><option>360</option>
+            </select>
+          </label>
+          <label class="grow">Audio language(s)
+            <input id="language" placeholder="en,hi">
+          </label>
+          <button class="ok" onclick="startSingle()">Start Download</button>
+        </div>
+      </div>
+
+      <div id="progressCard" class="card hidden">
+        <div class="row"><span id="jobState" class="badge">Queued</span><strong id="jobMessage"></strong></div>
+        <progress id="bar" max="100" value="0"></progress>
+        <div id="jobMeta" class="muted"></div>
+        <div style="margin-top:10px"><a id="downloadLink" class="hidden" target="_blank"><button class="ok">Download File</button></a></div>
+      </div>
+
+      <div id="playlistCard" class="card hidden">
+        <h2 id="playlistTitle"></h2>
+        <div class="results-actions">
+          <div id="playlistCount" class="muted"></div>
+          <div>
+            <button class="secondary" onclick="selectAllPlaylist()">Select All</button>
+            <button class="secondary" onclick="clearPlaylist()">Clear</button>
+          </div>
+        </div>
+        <div id="playlistGrid" class="grid" style="margin-top:12px"></div>
+        <button class="ok" style="margin-top:16px" onclick="downloadSelectedPlaylist()">Download Selected Playlist</button>
+      </div>
+
+      <div id="message" class="card hidden"></div>
+    </section>
+
+    <section id="search" class="tab hidden">
+      <h1>YouTube Search</h1>
+      <div class="sub">Search YouTube and send a result directly to the downloader.</div>
+      <div class="card">
+        <div class="row">
+          <div class="grow"><input id="searchQuery" placeholder="gaming, music, tutorial..."></div>
+          <button class="primary" onclick="searchYoutube()">Search</button>
+        </div>
+      </div>
+      <div id="searchGrid" class="grid"></div>
+    </section>
+
+    <section id="playlist" class="tab hidden">
+      <h1>Playlist Numbering</h1>
+      <div class="card notice">
+        Selected playlist entries are downloaded in their selection order as
+        <strong>001</strong>, <strong>002</strong>, <strong>003</strong>… up to <strong>999</strong>.
+        Single videos use their original YouTube title as the filename.
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+let playlistData = null;
+let currentJob = null;
+let selectedPlaylist = new Set();
+
+function qs(id){return document.getElementById(id)}
+function setMessage(text, cls='notice'){
+  const el=qs('message'); el.className='card '+cls; el.textContent=text; el.classList.remove('hidden');
+}
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(x=>x.classList.add('hidden'));
+  qs(name).classList.remove('hidden');
+  document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('active', x.dataset.tab===name));
+}
+document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
+
+async function api(url, options={}){
+  const r=await fetch(url, options);
+  const data=await r.json().catch(()=>({detail:'Server returned an invalid response.'}));
+  if(!r.ok) throw new Error(data.detail || 'Request failed');
+  return data;
+}
+
+async function preview(){
+  const url=qs('url').value.trim();
+  if(!url)return;
+  try{
+    const d=await api('/api/info?url='+encodeURIComponent(url));
+    qs('previewImage').src=d.thumbnail||'';
+    qs('previewTitle').textContent=d.title||'Unknown title';
+    qs('previewMeta').textContent=[d.channel||'', d.duration?formatDuration(d.duration):'', d.height?d.height+'p':''].filter(Boolean).join(' • ');
+    qs('previewCard').classList.remove('hidden');
+  }catch(e){setMessage(e.message,'error')}
+}
+
+async function loadPlaylist(){
+  const url=qs('url').value.trim();
+  if(!url)return;
+  try{
+    playlistData=await api('/api/playlist?url='+encodeURIComponent(url));
+    selectedPlaylist=new Set(playlistData.entries.map(x=>x.index));
+    renderPlaylist();
+    qs('playlistCard').classList.remove('hidden');
+    switchTab('downloader');
+  }catch(e){setMessage(e.message,'error')}
+}
+
+function renderPlaylist(){
+  qs('playlistTitle').textContent=playlistData.title;
+  qs('playlistCount').textContent=`${selectedPlaylist.size} selected / ${playlistData.count} total`;
+  qs('playlistGrid').innerHTML=playlistData.entries.map(item=>`
+    <label class="item">
+      <input type="checkbox" data-index="${item.index}" ${selectedPlaylist.has(item.index)?'checked':''} style="width:auto">
+      <img src="${item.thumbnail||''}" loading="lazy">
+      <h3>${item.index}. ${escapeHtml(item.title||'Untitled')}</h3>
+      <div class="muted">${item.duration?formatDuration(item.duration):''}</div>
+    </label>
+  `).join('');
+  qs('playlistGrid').querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change',()=>{
+      const n=Number(cb.dataset.index);
+      cb.checked?selectedPlaylist.add(n):selectedPlaylist.delete(n);
+      qs('playlistCount').textContent=`${selectedPlaylist.size} selected / ${playlistData.count} total`;
+    });
+  });
+}
+function selectAllPlaylist(){if(!playlistData)return; selectedPlaylist=new Set(playlistData.entries.map(x=>x.index)); renderPlaylist()}
+function clearPlaylist(){selectedPlaylist.clear(); renderPlaylist()}
+
+async function startSingle(){
+  const url=qs('url').value.trim();
+  if(!url)return setMessage('Paste a YouTube URL first.','error');
+  try{
+    const d=await api('/api/download',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url,
+        mode:qs('mode').value,
+        quality:Number(qs('quality').value),
+        audio_language:qs('language').value.trim(),
+        playlist:false,
+        selected_indexes:[]
+      })
+    });
+    beginPolling(d.job_id);
+  }catch(e){setMessage(e.message,'error')}
+}
+
+async function downloadSelectedPlaylist(){
+  if(!playlistData || selectedPlaylist.size===0)return setMessage('Select at least one playlist item.','error');
+  try{
+    const d=await api('/api/download',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url:qs('url').value.trim(),
+        mode:qs('mode').value,
+        quality:Number(qs('quality').value),
+        audio_language:qs('language').value.trim(),
+        playlist:true,
+        selected_indexes:Array.from(selectedPlaylist).sort((a,b)=>a-b)
+      })
+    });
+    beginPolling(d.job_id);
+  }catch(e){setMessage(e.message,'error')}
+}
+
+function beginPolling(jobId){
+  currentJob=jobId;
+  qs('progressCard').classList.remove('hidden');
+  qs('downloadLink').classList.add('hidden');
+  pollJob();
+}
+async function pollJob(){
+  if(!currentJob)return;
+  try{
+    const d=await api('/api/jobs/'+currentJob);
+    qs('jobState').textContent=d.state;
+    qs('jobMessage').textContent=d.message||'';
+    qs('bar').value=Number(d.percent||0);
+    qs('jobMeta').textContent=[
+      d.current&&d.total?`${d.current}/${d.total}`:'',
+      d.speed||'',
+      d.eta?'ETA '+d.eta:''
+    ].filter(Boolean).join(' • ');
+    if(d.state==='completed'){
+      const link=qs('downloadLink');
+      link.href='/api/jobs/'+currentJob+'/file';
+      link.classList.remove('hidden');
+      return;
+    }
+    if(d.state==='failed'){
+      setMessage(d.error||d.message||'Download failed.','error');
+      return;
+    }
+    setTimeout(pollJob,1000);
+  }catch(e){
+    setMessage(e.message,'error');
+  }
+}
+
+async function searchYoutube(){
+  const q=qs('searchQuery').value.trim();
+  if(!q)return;
+  try{
+    const d=await api('/api/search',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({query:q,limit:9})
+    });
+    qs('searchGrid').innerHTML=d.results.map(x=>`
+      <div class="item">
+        <img src="${x.thumbnail||''}" loading="lazy">
+        <h3>${escapeHtml(x.title||'Untitled')}</h3>
+        <div class="muted">${escapeHtml(x.channel||'')}</div>
+        <button class="primary" style="margin-top:8px" onclick='useSearchResult(${JSON.stringify(x.url)})'>Use</button>
+      </div>
+    `).join('');
+  }catch(e){setMessage(e.message,'error')}
+}
+
+function useSearchResult(url){
+  qs('url').value=url;
+  switchTab('downloader');
+  preview();
+}
+
+function formatDuration(sec){
+  sec=Math.max(0,Math.floor(Number(sec)||0));
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60;
+  return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`;
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+</script>
+</body>
+</html>
 
