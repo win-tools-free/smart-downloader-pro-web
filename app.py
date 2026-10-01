@@ -262,6 +262,11 @@ def youtube_ydl_opts(
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
+        
+        "sleep_interval_requests": 2,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        
         "ffmpeg_location": get_ffmpeg(),
         "noplaylist": not playlist,
     }
@@ -292,6 +297,11 @@ def base_ydl_opts(job_id):
         "fragment_retries": 5,
         "extractor_retries": 3,
         "socket_timeout": 30,
+        
+        "sleep_interval_requests": 2,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        
         "ffmpeg_location": get_ffmpeg(),
         "progress_hooks": [
             progress_hook
