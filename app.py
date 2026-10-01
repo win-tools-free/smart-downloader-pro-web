@@ -231,8 +231,6 @@ def compact_error(exc):
 
 YOUTUBE_CLIENT_STRATEGIES = [
     ("default", None),
-    ("web_embedded_default", ["web_embedded", "default"]),
-    ("android", ["android"]),
 ]
 
 
@@ -264,7 +262,6 @@ def youtube_ydl_opts(
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        "source_address": "0.0.0.0",
         "ffmpeg_location": get_ffmpeg(),
         "noplaylist": not playlist,
     }
@@ -295,7 +292,6 @@ def base_ydl_opts(job_id):
         "fragment_retries": 5,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        "source_address": "0.0.0.0",
         "ffmpeg_location": get_ffmpeg(),
         "progress_hooks": [
             progress_hook
