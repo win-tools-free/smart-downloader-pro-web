@@ -230,13 +230,13 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-# Removed "skip": ["webpage"] so PO-Tokens can generate properly.
 YOUTUBE_CLIENT_STRATEGIES = [
     ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
     ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"]}}}),
     ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
     ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
     ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
+    ("default", None),
 ]
 
 
@@ -254,10 +254,9 @@ def add_bypass_options(opts):
         }
     opts["remote_components"] = ["ejs:github"]
     
-    # 2. TLS Impersonation (Bypasses Cloudflare/YouTube 429 fingerprint blocks)
-    opts["impersonate"] = "chrome"
+    # Impersonate removed because curl_cffi is missing on Render.
     
-    # 3. Automatic Cookie Detection (The ultimate fallback)
+    # 2. Automatic Cookie Detection (The ultimate fallback)
     cookie_path = BASE_DIR / "cookies.txt"
     if cookie_path.exists():
         opts["cookiefile"] = str(cookie_path)
