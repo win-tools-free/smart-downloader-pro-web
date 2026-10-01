@@ -213,6 +213,40 @@ def base_ydl_opts(job_id: str):
             "inside the server."
         )
 
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": False,
+
+        "windowsfilenames": False,
+        "continuedl": True,
+
+        "retries": 3,
+        "fragment_retries": 3,
+        "socket_timeout": 30,
+
+        "ffmpeg_location": shutil.which("ffmpeg") or "ffmpeg",
+
+        # IMPORTANT:
+        # Python yt-dlp API requires a DICT here.
+        "js_runtimes": {
+            "deno": {
+                "path": deno_path
+            }
+        },
+
+        # Allow yt-dlp to obtain the EJS component when needed.
+        "remote_components": [
+            "ejs:github"
+        ],
+
+        "progress_hooks": [
+            lambda d: progress_hook(job_id, d)
+        ],
+    }
+
+    return opts
+
     return {
         "quiet": True,
         "no_warnings": False,
