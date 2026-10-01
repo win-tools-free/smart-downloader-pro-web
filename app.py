@@ -230,48 +230,38 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-# Render/Cloud IP ke 429 limits (watch page block) ko bypass karne ke liye
-# hum explicitly "webpage" extraction skip kar rahe hain aur direct Mobile API use kar rahe hain.
-
+# Removed "skip": ["webpage"] so PO-Tokens can generate properly.
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("android_api", {
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-                "skip": ["webpage"]
-            }
-        }
-    }),
-    ("ios_api", {
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios"],
-                "skip": ["webpage"]
-            }
-        }
-    }),
-    ("tv_api", {
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["tv"],
-                "skip": ["webpage"]
-            }
-        }
-    }),
+    ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
+    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"]}}}),
+    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
+    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
+    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
 ]
+
+
 # ============================================================
 # COMMON YT-DLP OPTIONS
 # ============================================================
 
-def add_youtube_runtime_options(opts):
+def add_bypass_options(opts):
+    # 1. JavaScript Runtimes for PO-Tokens
     if DENO_PATH:
         opts["js_runtimes"] = {
             "deno": {
                 "path": DENO_PATH
             }
         }
-        
     opts["remote_components"] = ["ejs:github"]
+    
+    # 2. TLS Impersonation (Bypasses Cloudflare/YouTube 429 fingerprint blocks)
+    opts["impersonate"] = "chrome"
+    
+    # 3. Automatic Cookie Detection (The ultimate fallback)
+    cookie_path = BASE_DIR / "cookies.txt"
+    if cookie_path.exists():
+        opts["cookiefile"] = str(cookie_path)
+        
     return opts
 
 
@@ -302,7 +292,7 @@ def youtube_ydl_opts(
         "noplaylist": not playlist,
     }
     
-    opts = add_youtube_runtime_options(opts)
+    opts = add_bypass_options(opts)
             
     if extra:
         opts.update(extra)
@@ -354,7 +344,7 @@ def base_ydl_opts(job_id):
         "noprogress": True,
     }
     
-    opts = add_youtube_runtime_options(opts)
+    opts = add_bypass_options(opts)
             
     return opts
 
