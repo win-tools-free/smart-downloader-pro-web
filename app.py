@@ -191,22 +191,6 @@ def get_ffmpeg():
     )
 
 
-def get_ffprobe():
-    return (
-        shutil.which("ffprobe")
-        or "ffprobe"
-    )
-
-
-def get_deno():
-    return shutil.which(
-        "deno"
-    )
-
-
-DENO_PATH = get_deno()
-
-
 def resolve_url(
     request: DownloadRequest | None,
     query_url: str = ""
@@ -228,29 +212,24 @@ def compact_error(exc):
 
 
 # ============================================================
-# COMMON YT-DLP OPTIONS
+# COMMON YT-DLP OPTIONS (COOKIES & FAST FALLBACK)
 # ============================================================
 
 def add_bypass_options(opts):
-    if DENO_PATH:
-        opts["js_runtimes"] = {
-            "deno": {
-                "path": DENO_PATH
-            }
-        }
-    opts["remote_components"] = ["ejs:github"]
-    
-    # Enable yt-dlp internal smart client fallback instead of manual python loop
+    # yt-dlp internal smart fallback (instantly falls back without freezing app)
     opts["extractor_args"] = {
         "youtube": {
-            "player_client": ["android", "ios", "tv", "web_embedded"]
+            "player_client": ["android", "mweb", "tv", "default"]
         }
     }
     
-    # Ultimate fix for Render IP Ban (If file exists, use it automatically)
+    # Ultimate fix for Render IP Ban (429 & 403 bypass)
     cookie_path = BASE_DIR / "cookies.txt"
     if cookie_path.exists():
         opts["cookiefile"] = str(cookie_path)
+        print("[INFO] cookies.txt FOUND! Using cookies for YouTube auth.", flush=True)
+    else:
+        print("[WARNING] cookies.txt NOT FOUND! You WILL likely get 429/403 block errors from YouTube.", flush=True)
         
     return opts
 
@@ -398,7 +377,7 @@ def extract_youtube_info(
             
     except Exception as exc:
         error_text = compact_error(exc)
-        print(f"[INFO] FAILED: {error_text}", flush=True)
+        print(f"[INFO ERROR] FAILED: {error_text}", flush=True)
         
         if is_local_error(error_text):
             raise
@@ -425,7 +404,7 @@ def extract_youtube_search(
         playlist=True
     )
     
-    # Remove player_client constraints for search so it loads instantly without 429 errors
+    # Search loads instantly because we don't need heavy client tokens
     if "extractor_args" in opts:
         del opts["extractor_args"]
         
@@ -442,7 +421,7 @@ def extract_youtube_search(
             
     except Exception as exc:
         error_text = compact_error(exc)
-        print(f"[SEARCH] FAILED: {error_text}", flush=True)
+        print(f"[SEARCH ERROR] FAILED: {error_text}", flush=True)
         
         if is_local_error(error_text):
             raise
@@ -471,7 +450,7 @@ def download_video(
         
     except Exception as exc:
         error_text = compact_error(exc)
-        print(f"[DOWNLOAD] FAILED: {error_text}", flush=True)
+        print(f"[DOWNLOAD ERROR] FAILED: {error_text}", flush=True)
         
         if is_local_error(error_text):
             raise
@@ -1432,8 +1411,7 @@ def api_info(
             exc
         )
         print(
-            "[INFO ERROR]",
-            error_text, flush=True
+            f"[INFO API ERROR] {error_text}", flush=True
         )
         raise HTTPException(
             400,
@@ -1478,8 +1456,7 @@ def api_search(
             exc
         )
         print(
-            "[SEARCH ERROR]",
-            error_text, flush=True
+            f"[SEARCH API ERROR] {error_text}", flush=True
         )
         raise HTTPException(
             400,
@@ -1598,8 +1575,7 @@ def api_playlist(
             exc
         )
         print(
-            "[PLAYLIST ERROR]",
-            error_text, flush=True
+            f"[PLAYLIST API ERROR] {error_text}", flush=True
         )
         raise HTTPException(
             400,
@@ -1827,15 +1803,6 @@ def api_job_file(
     "/api/health"
 )
 def api_health():
-    deno = get_deno()
-    
-    ffmpeg = shutil.which(
-        "ffmpeg"
-    )
-    ffprobe = shutil.which(
-        "ffprobe"
-    )
-    
     try:
         ytdlp_version = (
             yt_dlp.version.__version__
@@ -1854,24 +1821,6 @@ def api_health():
         "app": APP_NAME,
         "version": APP_VERSION,
         "yt_dlp": ytdlp_version,
-        "deno": bool(
-            deno
-        ),
-        "deno_path": (
-            deno or ""
-        ),
-        "ffmpeg": bool(
-            ffmpeg
-        ),
-        "ffmpeg_path": (
-            ffmpeg or ""
-        ),
-        "ffprobe": bool(
-            ffprobe
-        ),
-        "ffprobe_path": (
-            ffprobe or ""
-        ),
         "yt_dlp_ejs": ejs_available,
         "max_playlist_items":
             MAX_PLAYLIST_ITEMS,
@@ -1985,12 +1934,6 @@ def startup_event():
             "__version__",
             "unknown"
         ), flush=True
-    )
-    print(
-        "Deno:",
-        get_deno()
-        or
-        "NOT FOUND", flush=True
     )
     print(
         "FFmpeg:",
