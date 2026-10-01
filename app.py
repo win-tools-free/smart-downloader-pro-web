@@ -4,6 +4,7 @@ import shutil
 import threading
 import uuid
 import zipfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 # ============================================================
 
 APP_NAME = "Smart Downloader Pro Web"
+APP_VERSION = "3.0.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -53,7 +55,7 @@ DOWNLOAD_ROOT.mkdir(
 
 app = FastAPI(
     title=APP_NAME,
-    version="2.1.0"
+    version=APP_VERSION
 )
 
 STATIC_DIR = BASE_DIR / "static"
@@ -200,22 +202,12 @@ def format_bytes(value):
 
 def get_ffmpeg():
 
-    path = shutil.which("ffmpeg")
-
-    if path:
-        return path
-
-    return "ffmpeg"
+    return shutil.which("ffmpeg") or "ffmpeg"
 
 
 def get_ffprobe():
 
-    path = shutil.which("ffprobe")
-
-    if path:
-        return path
-
-    return "ffprobe"
+    return shutil.which("ffprobe") or "ffprobe"
 
 
 def get_deno():
@@ -234,11 +226,94 @@ def resolve_url(
     return (query_url or "").strip()
 
 
+def compact_error(exc):
+
+    text = str(exc or "").strip()
+
+    if not text:
+        return "Unknown yt-dlp error."
+
+    return text[-5000:]
+
+
 # ============================================================
-# YT-DLP CONFIGURATION
+# YOUTUBE EXTRACTION STRATEGIES
 # ============================================================
 
-def youtube_ydl_opts(extra=None):
+# Current yt-dlp supports multiple YouTube player clients.
+#
+# We try the normal/default configuration first and then
+# alternate clients if YouTube refuses the player response.
+#
+# IMPORTANT:
+# Do not use "all" because yt-dlp itself warns that it is
+# generally not recommended.
+# ============================================================
+
+YOUTUBE_CLIENT_STRATEGIES = [
+
+    {
+        "name": "default",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["default"]
+            }
+        }
+    },
+
+    {
+        "name": "web_safari",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web_safari"]
+            }
+        }
+    },
+
+    {
+        "name": "mweb",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"]
+            }
+        }
+    },
+
+    {
+        "name": "android",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"]
+            }
+        }
+    },
+
+    {
+        "name": "ios",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios"]
+            }
+        }
+    },
+
+    {
+        "name": "tv",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv"]
+            }
+        }
+    },
+
+]
+
+
+# ============================================================
+# COMMON YT-DLP OPTIONS
+# ============================================================
+
+def youtube_ydl_opts(extra=None, strategy=None):
 
     deno_path = get_deno()
 
@@ -257,13 +332,15 @@ def youtube_ydl_opts(extra=None):
 
         "skip_download": True,
 
-        "retries": 5,
+        "retries": 3,
 
-        "fragment_retries": 5,
+        "fragment_retries": 3,
 
-        "extractor_retries": 3,
+        "extractor_retries": 2,
 
         "socket_timeout": 30,
+
+        "source_address": "0.0.0.0",
 
         "ffmpeg_location": get_ffmpeg(),
 
@@ -273,18 +350,40 @@ def youtube_ydl_opts(extra=None):
             }
         },
 
+        # Keep EJS available remotely so the solver can be
+        # refreshed when YouTube changes its JS challenges.
         "remote_components": [
             "ejs:github"
         ],
+
+        # Avoid reading unrelated playlists during single-video
+        # information extraction.
+        "noplaylist": True,
+
     }
 
+    if strategy:
+
+        extractor_args = (
+            strategy.get("extractor_args")
+            or {}
+        )
+
+        opts["extractor_args"] = (
+            extractor_args
+        )
+
     if extra:
+
         opts.update(extra)
 
     return opts
 
 
-def base_ydl_opts(job_id):
+def base_ydl_opts(
+    job_id,
+    strategy=None
+):
 
     deno_path = get_deno()
 
@@ -304,7 +403,7 @@ def base_ydl_opts(job_id):
         exist_ok=True
     )
 
-    return {
+    opts = {
 
         "quiet": True,
 
@@ -317,6 +416,8 @@ def base_ydl_opts(job_id):
         "extractor_retries": 3,
 
         "socket_timeout": 30,
+
+        "source_address": "0.0.0.0",
 
         "ffmpeg_location": get_ffmpeg(),
 
@@ -347,7 +448,242 @@ def base_ydl_opts(job_id):
         "nopart": False,
 
         "noprogress": True,
+
     }
+
+    if strategy:
+
+        opts["extractor_args"] = (
+            strategy.get(
+                "extractor_args"
+            )
+            or {}
+        )
+
+    return opts
+
+
+# ============================================================
+# EXTRACTION ERROR DETECTION
+# ============================================================
+
+def is_extraction_error(exc):
+
+    text = str(exc or "").lower()
+
+    indicators = [
+
+        "failed to extract any player response",
+
+        "unable to extract",
+
+        "player response",
+
+        "sign in to confirm",
+
+        "confirm you're not a bot",
+
+        "confirm you are not a bot",
+
+        "video unavailable",
+
+        "this content isn't available",
+
+        "this content is not available",
+
+        "http error 403",
+
+        "http error 429",
+
+        "po token",
+
+        "challenge",
+
+    ]
+
+    return any(
+        item in text
+        for item in indicators
+    )
+
+
+# ============================================================
+# ROBUST YOUTUBE INFO EXTRACTION
+# ============================================================
+
+def extract_youtube_info(
+    url,
+    extra=None,
+    allow_playlist=False
+):
+
+    if not is_youtube_url(url):
+
+        raise ValueError(
+            "Please enter a valid YouTube URL."
+        )
+
+    errors = []
+
+    strategies = YOUTUBE_CLIENT_STRATEGIES
+
+    for strategy in strategies:
+
+        name = strategy["name"]
+
+        try:
+
+            print(
+                f"[YT] Trying player client: {name}"
+            )
+
+            opts_extra = dict(
+                extra or {}
+            )
+
+            opts_extra["noplaylist"] = (
+                not allow_playlist
+            )
+
+            opts_extra["skip_download"] = True
+
+            opts = youtube_ydl_opts(
+                opts_extra,
+                strategy
+            )
+
+            with yt_dlp.YoutubeDL(
+                opts
+            ) as ydl:
+
+                info = ydl.extract_info(
+                    url,
+                    download=False
+                )
+
+            if info:
+
+                print(
+                    f"[YT] Extraction success: {name}"
+                )
+
+                return info
+
+        except Exception as exc:
+
+            error_text = compact_error(
+                exc
+            )
+
+            errors.append(
+                f"{name}: {error_text}"
+            )
+
+            print(
+                f"[YT] {name} failed: "
+                f"{error_text}"
+            )
+
+            # Continue to the next strategy.
+            continue
+
+    joined = "\n\n".join(
+        errors[-4:]
+    )
+
+    raise RuntimeError(
+        "YouTube extraction failed after trying "
+        "multiple player clients.\n\n"
+        f"{joined}"
+    )
+
+
+# ============================================================
+# DOWNLOAD EXTRACTION WITH FALLBACK
+# ============================================================
+
+def download_with_fallback(
+    job_id,
+    url,
+    opts_factory
+):
+
+    errors = []
+
+    for strategy in YOUTUBE_CLIENT_STRATEGIES:
+
+        name = strategy["name"]
+
+        try:
+
+            print(
+                f"[DOWNLOAD] Trying player client: {name}"
+            )
+
+            opts = opts_factory(
+                strategy
+            )
+
+            with yt_dlp.YoutubeDL(
+                opts
+            ) as ydl:
+
+                ydl.download([
+                    url
+                ])
+
+            print(
+                f"[DOWNLOAD] Success: {name}"
+            )
+
+            return
+
+        except Exception as exc:
+
+            error_text = compact_error(
+                exc
+            )
+
+            errors.append(
+                f"{name}: {error_text}"
+            )
+
+            print(
+                f"[DOWNLOAD] {name} failed: "
+                f"{error_text}"
+            )
+
+            # If it is clearly a local/output error,
+            # retrying different player clients won't help.
+            lower = error_text.lower()
+
+            local_error_words = [
+                "permission denied",
+                "no space left",
+                "ffmpeg not found",
+                "ffprobe not found",
+                "disk quota",
+                "read-only file system",
+            ]
+
+            if any(
+                word in lower
+                for word in local_error_words
+            ):
+
+                raise
+
+            continue
+
+    joined = "\n\n".join(
+        errors[-4:]
+    )
+
+    raise RuntimeError(
+        "YouTube download failed after trying "
+        "multiple player clients.\n\n"
+        f"{joined}"
+    )
 
 
 # ============================================================
@@ -359,12 +695,20 @@ def choose_format(
     audio_language=""
 ):
 
-    height = int(quality)
+    height = int(
+        quality
+    )
 
     if audio_language:
 
+        lang = re.sub(
+            r"[^a-zA-Z0-9-]",
+            "",
+            str(audio_language)
+        )
+
         audio_selector = (
-            f"bestaudio[language^={audio_language}]"
+            f"bestaudio[language^={lang}]"
             "/bestaudio"
         )
 
@@ -375,6 +719,7 @@ def choose_format(
             "/bestaudio"
         )
 
+    # Prefer H.264/AVC video.
     video_selector = (
         f"bestvideo"
         f"[vcodec^=avc1]"
@@ -407,7 +752,9 @@ def update_job(
         if job_id not in jobs:
             return
 
-        jobs[job_id].update(values)
+        jobs[job_id].update(
+            values
+        )
 
 
 def progress_hook(data):
@@ -464,7 +811,13 @@ def progress_hook(data):
             status="downloading",
 
             percent=round(
-                min(max(percent, 0), 100),
+                min(
+                    max(
+                        percent,
+                        0
+                    ),
+                    100
+                ),
                 1
             ),
 
@@ -488,9 +841,13 @@ def progress_hook(data):
                 else ""
             ),
 
-            filename=Path(
-                filename
-            ).name if filename else ""
+            filename=(
+                Path(
+                    filename
+                ).name
+                if filename
+                else ""
+            )
 
         )
 
@@ -506,6 +863,18 @@ def progress_hook(data):
 
         )
 
+    elif status == "error":
+
+        update_job(
+
+            job_id,
+
+            status="error",
+
+            error="yt-dlp reported a download error."
+
+        )
+
 
 # ============================================================
 # INFO EXTRACTION
@@ -513,36 +882,14 @@ def progress_hook(data):
 
 def get_info(url):
 
-    if not is_youtube_url(url):
-
-        raise ValueError(
-            "Please enter a valid YouTube URL."
-        )
-
-    opts = youtube_ydl_opts({
-
-        "extract_flat": False,
-
-        "noplaylist": True,
-
-    })
-
-    with yt_dlp.YoutubeDL(
-        opts
-    ) as ydl:
-
-        info = ydl.extract_info(
-            url,
-            download=False
-        )
-
-    if not info:
-
-        raise RuntimeError(
-            "Unable to extract video information."
-        )
-
-    return info
+    return extract_youtube_info(
+        url,
+        extra={
+            "extract_flat": False,
+            "noplaylist": True,
+        },
+        allow_playlist=False
+    )
 
 
 def build_info_response(info):
@@ -604,6 +951,12 @@ def build_info_response(info):
                 "dynamic_range"
             ),
 
+            "protocol": fmt.get(
+                "protocol"
+            ),
+
+            "url": None,
+
         })
 
     return {
@@ -652,7 +1005,12 @@ def build_info_response(info):
         "formats": formats,
 
         "subtitles": list(
-            (info.get("subtitles") or {}).keys()
+            (
+                info.get(
+                    "subtitles"
+                )
+                or {}
+            ).keys()
         ),
 
         "automatic_captions": list(
@@ -685,22 +1043,15 @@ def run_single_video(
         exist_ok=True
     )
 
-    info_opts = youtube_ydl_opts({
-
-        "extract_flat": False,
-
-        "noplaylist": True,
-
-    })
-
-    with yt_dlp.YoutubeDL(
-        info_opts
-    ) as ydl:
-
-        info = ydl.extract_info(
-            url,
-            download=False
-        )
+    # First obtain title with fallback extraction.
+    info = extract_youtube_info(
+        url,
+        extra={
+            "extract_flat": False,
+            "noplaylist": True,
+        },
+        allow_playlist=False
+    )
 
     title = safe_title(
         info.get(
@@ -714,85 +1065,114 @@ def run_single_video(
         f"{title}.%(ext)s"
     )
 
-    opts = base_ydl_opts(
-        job_id
+    update_job(
+
+        job_id,
+
+        status="preparing",
+
+        title=title,
+
+        percent=0
+
     )
 
-    if mode == "audio":
+    def make_options(
+        strategy
+    ):
+
+        opts = base_ydl_opts(
+            job_id,
+            strategy
+        )
 
         opts.update({
 
-            "outtmpl": final_template,
+            "outtmpl":
+                final_template,
 
-            "format": (
-                "bestaudio[acodec^=mp4a]"
-                "/bestaudio"
-            ),
-
-            "postprocessors": [
-
-                {
-                    "key":
-                        "FFmpegExtractAudio",
-
-                    "preferredcodec":
-                        "m4a",
-
-                    "preferredquality":
-                        "0",
-                }
-
-            ],
-
-            "postprocessor_args": [
-                "-movflags",
-                "+faststart"
-            ],
-
-            "merge_output_format": "m4a",
+            "noplaylist":
+                True,
 
         })
 
-    else:
+        if mode == "audio":
 
-        opts.update({
+            opts.update({
 
-            "outtmpl": final_template,
+                "format": (
+                    "bestaudio[acodec^=mp4a]"
+                    "/bestaudio"
+                ),
 
-            "format": choose_format(
-                quality,
-                audio_language
-            ),
+                "postprocessors": [
 
-            "merge_output_format": "mp4",
+                    {
+                        "key":
+                            "FFmpegExtractAudio",
 
-            "postprocessor_args": [
+                        "preferredcodec":
+                            "m4a",
 
-                "-c:v",
-                "copy",
+                        "preferredquality":
+                            "0",
 
-                "-c:a",
-                "aac",
+                    }
 
-                "-b:a",
-                "192k",
+                ],
 
-                "-movflags",
-                "+faststart"
+                "postprocessor_args": [
+                    "-movflags",
+                    "+faststart"
+                ],
 
-            ],
+            })
 
-        })
+        else:
 
-    def job_progress(data):
+            opts.update({
 
-        data["_smart_job_id"] = job_id
+                "format": choose_format(
+                    quality,
+                    audio_language
+                ),
 
-        progress_hook(data)
+                "merge_output_format":
+                    "mp4",
 
-    opts["progress_hooks"] = [
-        job_progress
-    ]
+                "postprocessor_args": [
+
+                    "-c:v",
+                    "copy",
+
+                    "-c:a",
+                    "aac",
+
+                    "-b:a",
+                    "192k",
+
+                    "-movflags",
+                    "+faststart"
+
+                ],
+
+            })
+
+        def job_progress(data):
+
+            data["_smart_job_id"] = (
+                job_id
+            )
+
+            progress_hook(
+                data
+            )
+
+        opts["progress_hooks"] = [
+            job_progress
+        ]
+
+        return opts
 
     update_job(
 
@@ -806,13 +1186,11 @@ def run_single_video(
 
     )
 
-    with yt_dlp.YoutubeDL(
-        opts
-    ) as ydl:
-
-        ydl.download([
-            url
-        ])
+    download_with_fallback(
+        job_id,
+        url,
+        make_options
+    )
 
     files = []
 
@@ -820,7 +1198,9 @@ def run_single_video(
 
         if file.is_file():
 
-            files.append(file)
+            files.append(
+                file
+            )
 
     if not files:
 
@@ -875,26 +1255,17 @@ def run_playlist(
 
     )
 
-    opts = youtube_ydl_opts({
-
-        "extract_flat": True,
-
-        "skip_download": True,
-
-        "noplaylist": False,
-
-        "playlistend": MAX_PLAYLIST_ITEMS,
-
-    })
-
-    with yt_dlp.YoutubeDL(
-        opts
-    ) as ydl:
-
-        info = ydl.extract_info(
-            url,
-            download=False
-        )
+    info = extract_youtube_info(
+        url,
+        extra={
+            "extract_flat": True,
+            "skip_download": True,
+            "noplaylist": False,
+            "playlistend":
+                MAX_PLAYLIST_ITEMS,
+        },
+        allow_playlist=True
+    )
 
     entries = [
         item
@@ -944,7 +1315,9 @@ def run_playlist(
 
     downloaded_files = []
 
-    total = len(entries)
+    total = len(
+        entries
+    )
 
     for position, item in enumerate(
         entries,
@@ -1002,157 +1375,183 @@ def run_playlist(
             f"{numbered_name}.%(ext)s"
         )
 
-        opts = base_ydl_opts(
-            job_id
-        )
-
-        if mode == "audio":
-
-            opts.update({
-
-                "outtmpl": template,
-
-                "format": (
-                    "bestaudio[acodec^=mp4a]"
-                    "/bestaudio"
-                ),
-
-                "postprocessors": [
-
-                    {
-                        "key":
-                            "FFmpegExtractAudio",
-
-                        "preferredcodec":
-                            "m4a",
-
-                        "preferredquality":
-                            "0",
-                    }
-
-                ],
-
-            })
-
-        else:
-
-            opts.update({
-
-                "outtmpl": template,
-
-                "format": choose_format(
-                    quality,
-                    audio_language
-                ),
-
-                "merge_output_format":
-                    "mp4",
-
-                "postprocessor_args": [
-
-                    "-c:v",
-                    "copy",
-
-                    "-c:a",
-                    "aac",
-
-                    "-b:a",
-                    "192k",
-
-                    "-movflags",
-                    "+faststart"
-
-                ],
-
-            })
-
-        def playlist_progress(
-            data,
-            jid=job_id,
+        def make_options(
+            strategy,
             pos=position,
-            count=total
+            count=total,
+            out_template=template
         ):
 
-            if data.get("status") != "downloading":
-                return
-
-            downloaded = data.get(
-                "downloaded_bytes",
-                0
+            opts = base_ydl_opts(
+                job_id,
+                strategy
             )
 
-            total_bytes = (
-                data.get("total_bytes")
-                or data.get("total_bytes_estimate")
-                or 0
-            )
+            opts.update({
 
-            item_percent = 0
+                "outtmpl":
+                    out_template,
 
-            if total_bytes:
+                "noplaylist":
+                    True,
 
-                item_percent = (
-                    downloaded /
-                    total_bytes
+            })
+
+            if mode == "audio":
+
+                opts.update({
+
+                    "format": (
+                        "bestaudio[acodec^=mp4a]"
+                        "/bestaudio"
+                    ),
+
+                    "postprocessors": [
+
+                        {
+                            "key":
+                                "FFmpegExtractAudio",
+
+                            "preferredcodec":
+                                "m4a",
+
+                            "preferredquality":
+                                "0",
+                        }
+
+                    ],
+
+                })
+
+            else:
+
+                opts.update({
+
+                    "format": choose_format(
+                        quality,
+                        audio_language
+                    ),
+
+                    "merge_output_format":
+                        "mp4",
+
+                    "postprocessor_args": [
+
+                        "-c:v",
+                        "copy",
+
+                        "-c:a",
+                        "aac",
+
+                        "-b:a",
+                        "192k",
+
+                        "-movflags",
+                        "+faststart"
+
+                    ],
+
+                })
+
+            def playlist_progress(
+                data,
+                jid=job_id,
+                current_pos=pos,
+                item_count=count
+            ):
+
+                if data.get(
+                    "status"
+                ) != "downloading":
+
+                    return
+
+                downloaded = data.get(
+                    "downloaded_bytes",
+                    0
+                )
+
+                total_bytes = (
+                    data.get(
+                        "total_bytes"
+                    )
+                    or
+                    data.get(
+                        "total_bytes_estimate"
+                    )
+                    or 0
+                )
+
+                item_percent = 0
+
+                if total_bytes:
+
+                    item_percent = (
+                        downloaded /
+                        total_bytes
+                    ) * 100
+
+                overall = (
+                    (
+                        (current_pos - 1)
+                        + item_percent / 100
+                    )
+                    / item_count
                 ) * 100
 
-            overall = (
-                (
-                    (pos - 1)
-                    + item_percent / 100
-                )
-                / count
-            ) * 100
+                update_job(
 
-            update_job(
+                    jid,
 
-                jid,
+                    status="downloading",
 
-                status="downloading",
+                    current=current_pos,
 
-                current=pos,
+                    total=item_count,
 
-                total=count,
+                    percent=round(
+                        overall,
+                        1
+                    ),
 
-                percent=round(
-                    overall,
-                    1
-                ),
+                    downloaded=format_bytes(
+                        downloaded
+                    ),
 
-                downloaded=format_bytes(
-                    downloaded
-                ),
+                    speed=(
+                        f"{format_bytes(data.get('speed'))}/s"
+                        if data.get("speed")
+                        else ""
+                    ),
 
-                speed=(
-                    f"{format_bytes(data.get('speed'))}/s"
-                    if data.get("speed")
-                    else ""
-                ),
+                    eta=(
+                        f"{data.get('eta')}s"
+                        if data.get("eta") is not None
+                        else ""
+                    )
 
-                eta=(
-                    f"{data.get('eta')}s"
-                    if data.get("eta") is not None
-                    else ""
                 )
 
-            )
+            opts["progress_hooks"] = [
+                playlist_progress
+            ]
 
-        opts["progress_hooks"] = [
-            playlist_progress
-        ]
+            return opts
 
-        with yt_dlp.YoutubeDL(
-            opts
-        ) as ydl:
-
-            ydl.download([
-                video_url
-            ])
+        download_with_fallback(
+            job_id,
+            video_url,
+            make_options
+        )
 
         generated = [
+
             file
+
             for file in playlist_dir.iterdir()
+
             if file.is_file()
+
         ]
 
         if generated:
@@ -1314,8 +1713,13 @@ def execute_job(
 
     except Exception as exc:
 
+        error_text = compact_error(
+            exc
+        )
+
         print(
-            f"[JOB ERROR] {job_id}: {exc}"
+            f"[JOB ERROR] {job_id}: "
+            f"{error_text}"
         )
 
         update_job(
@@ -1324,7 +1728,7 @@ def execute_job(
 
             status="error",
 
-            error=str(exc)
+            error=error_text
 
         )
 
@@ -1353,6 +1757,7 @@ async def index():
     if not index_file.exists():
 
         return HTMLResponse(
+
             f"""
             <!doctype html>
             <html>
@@ -1365,7 +1770,9 @@ async def index():
             </body>
             </html>
             """,
+
             status_code=500
+
         )
 
     return index_file.read_text(
@@ -1375,20 +1782,6 @@ async def index():
 
 # ============================================================
 # INFO API
-#
-# IMPORTANT:
-# Supports BOTH:
-#
-# POST /api/info
-# JSON:
-# {"url":"https://youtube.com/..."}
-#
-# AND:
-#
-# GET /api/info?url=https://youtube.com/...
-#
-# This eliminates 405 errors caused by frontend/backend
-# request-method mismatches.
 # ============================================================
 
 @app.api_route(
@@ -1396,10 +1789,13 @@ async def index():
     methods=["GET", "POST"]
 )
 async def api_info(
+
     request: DownloadRequest | None = None,
+
     url: str = Query(
         default=""
     )
+
 ):
 
     final_url = resolve_url(
@@ -1426,14 +1822,22 @@ async def api_info(
 
     except Exception as exc:
 
+        error_text = compact_error(
+            exc
+        )
+
         print(
             "[INFO ERROR]",
-            repr(exc)
+            error_text
         )
 
         raise HTTPException(
+
             400,
-            f"Unable to extract video information: {exc}"
+
+            f"Unable to extract video information: "
+            f"{error_text}"
+
         )
 
 
@@ -1478,25 +1882,30 @@ async def api_search(
 
     try:
 
-        with yt_dlp.YoutubeDL(
-            opts
-        ) as ydl:
-
-            data = ydl.extract_info(
-                search_query,
-                download=False
-            )
+        data = extract_youtube_info(
+            search_query,
+            extra={
+                "extract_flat": True,
+                "skip_download": True,
+                "noplaylist": False,
+            },
+            allow_playlist=True
+        )
 
     except Exception as exc:
 
+        error_text = compact_error(
+            exc
+        )
+
         print(
             "[SEARCH ERROR]",
-            repr(exc)
+            error_text
         )
 
         raise HTTPException(
             400,
-            f"Search failed: {exc}"
+            f"Search failed: {error_text}"
         )
 
     results = []
@@ -1513,7 +1922,7 @@ async def api_search(
             "id"
         )
 
-        url = (
+        video_url = (
             item.get("webpage_url")
             or (
                 f"https://www.youtube.com/watch?v={vid}"
@@ -1539,7 +1948,7 @@ async def api_search(
                 "duration"
             ),
 
-            "url": url,
+            "url": video_url,
 
             "thumbnail": (
                 f"https://i.ytimg.com/vi/"
@@ -1556,16 +1965,7 @@ async def api_search(
 
 
 # ============================================================
-# PLAYLIST INFO
-#
-# IMPORTANT:
-# Supports BOTH GET and POST.
-#
-# POST:
-# {"url":"https://youtube.com/playlist?..."}
-#
-# GET:
-# /api/playlist?url=https://youtube.com/playlist?...
+# PLAYLIST API
 # ============================================================
 
 @app.api_route(
@@ -1573,10 +1973,13 @@ async def api_search(
     methods=["GET", "POST"]
 )
 async def api_playlist(
+
     request: DownloadRequest | None = None,
+
     url: str = Query(
         default=""
     )
+
 ):
 
     final_url = resolve_url(
@@ -1600,39 +2003,34 @@ async def api_playlist(
             "Only YouTube playlist URLs are supported."
         )
 
-    opts = youtube_ydl_opts({
-
-        "extract_flat": True,
-
-        "skip_download": True,
-
-        "noplaylist": False,
-
-        "playlistend": MAX_PLAYLIST_ITEMS,
-
-    })
-
     try:
 
-        with yt_dlp.YoutubeDL(
-            opts
-        ) as ydl:
-
-            data = ydl.extract_info(
-                final_url,
-                download=False
-            )
+        data = extract_youtube_info(
+            final_url,
+            extra={
+                "extract_flat": True,
+                "skip_download": True,
+                "noplaylist": False,
+                "playlistend":
+                    MAX_PLAYLIST_ITEMS,
+            },
+            allow_playlist=True
+        )
 
     except Exception as exc:
 
+        error_text = compact_error(
+            exc
+        )
+
         print(
             "[PLAYLIST ERROR]",
-            repr(exc)
+            error_text
         )
 
         raise HTTPException(
             400,
-            f"Playlist extraction failed: {exc}"
+            f"Playlist extraction failed: {error_text}"
         )
 
     entries = []
@@ -1877,9 +2275,13 @@ async def api_job_file(
         )
 
     return FileResponse(
+
         path=str(path),
+
         filename=path.name,
+
         media_type="application/octet-stream"
+
     )
 
 
@@ -1928,7 +2330,7 @@ async def api_health():
 
         "app": APP_NAME,
 
-        "version": "2.1.0",
+        "version": APP_VERSION,
 
         "yt_dlp": ytdlp_version,
 
@@ -1954,6 +2356,11 @@ async def api_health():
 
         "max_concurrent_jobs":
             MAX_CONCURRENT_JOBS,
+
+        "youtube_clients": [
+            x["name"]
+            for x in YOUTUBE_CLIENT_STRATEGIES
+        ],
 
         "info_methods": [
             "GET",
@@ -1986,16 +2393,18 @@ async def startup_event():
         exist_ok=True
     )
 
-    print("=" * 60)
+    print("=" * 70)
 
-    print(APP_NAME)
-
-    print("=" * 60)
+    print(
+        APP_NAME
+    )
 
     print(
         "Version:",
-        "2.1.0"
+        APP_VERSION
     )
+
+    print("=" * 70)
 
     print(
         "yt-dlp:",
@@ -2041,6 +2450,14 @@ async def startup_event():
         )
 
     print(
+        "YouTube clients:",
+        ", ".join(
+            x["name"]
+            for x in YOUTUBE_CLIENT_STRATEGIES
+        )
+    )
+
+    print(
         "Download directory:",
         DOWNLOAD_ROOT
     )
@@ -2057,4 +2474,5 @@ async def startup_event():
         "DOWNLOAD API: POST"
     )
 
-    print("=" * 60)
+    print("=" * 70)
+
