@@ -2452,9 +2452,8 @@ async function preview(){
         qs("previewCard")
             .classList.add("hidden");
 
-
         setMessage(
-            error.message,
+            "Preview failed: " + error.message,
             "error"
         );
 
@@ -2762,6 +2761,13 @@ function clearPlaylist(){
 
 async function startSingle(){
 
+    if(pollTimer){
+        clearTimeout(pollTimer);
+        pollTimer = null;
+    }
+
+    currentJob = null;
+
     const url =
         qs("url")
         .value
@@ -2870,6 +2876,13 @@ async function startSingle(){
    ========================================================= */
 
 async function downloadSelectedPlaylist(){
+
+    if(pollTimer){
+        clearTimeout(pollTimer);
+        pollTimer = null;
+    }
+
+    currentJob = null;
 
     if(
         !playlistData ||
@@ -3178,6 +3191,12 @@ async function pollJob(){
 
     }
     catch(error){
+        currentJob = null;
+
+        if(pollTimer){
+            clearTimeout(pollTimer);
+            pollTimer = null;
+        }
 
         setMessage(
             error.message,
