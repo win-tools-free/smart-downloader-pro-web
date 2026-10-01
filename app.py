@@ -228,10 +228,14 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-
+# Render/Cloud IP 429 limits ko bypass karne ke liye mobile clients sabse best hain
 YOUTUBE_CLIENT_STRATEGIES = [
+    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"]}}}),
+    ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
+    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
     ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
     ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
+    ("default", None),
 ]
 
 
