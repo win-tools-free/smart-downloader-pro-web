@@ -228,25 +228,10 @@ def compact_error(exc):
 
 
 # ============================================================
-# YOUTUBE CLIENT STRATEGIES
-# ============================================================
-# "skip": ["webpage"] waapis add kar diya gaya hai jaisa aapne manga tha
-YOUTUBE_CLIENT_STRATEGIES = [
-    ("android", {"extractor_args": {"youtube": {"player_client": ["android"], "skip": ["webpage"]}}}),
-    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"], "skip": ["webpage"]}}}),
-    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"], "skip": ["webpage"]}}}),
-    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"], "skip": ["webpage"]}}}),
-    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"], "skip": ["webpage"]}}}),
-    ("default", None),
-]
-
-
-# ============================================================
 # COMMON YT-DLP OPTIONS
 # ============================================================
 
 def add_bypass_options(opts):
-    # 1. JavaScript Runtimes for PO-Tokens
     if DENO_PATH:
         opts["js_runtimes"] = {
             "deno": {
@@ -255,10 +240,14 @@ def add_bypass_options(opts):
         }
     opts["remote_components"] = ["ejs:github"]
     
-    # Render par 'impersonate' curl_cffi hang karta hai, isliye hata diya
-    # opts["impersonate"] = "chrome" 
+    # Enable yt-dlp internal smart client fallback instead of manual python loop
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "ios", "tv", "web_embedded"]
+        }
+    }
     
-    # 2. Automatic Cookie Detection (The ultimate fallback for 429 errors)
+    # Ultimate fix for Render IP Ban (If file exists, use it automatically)
     cookie_path = BASE_DIR / "cookies.txt"
     if cookie_path.exists():
         opts["cookiefile"] = str(cookie_path)
@@ -274,13 +263,10 @@ def youtube_ydl_opts(
         "quiet": True,
         "no_warnings": False,
         "skip_download": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "extractor_retries": 3,
-        "socket_timeout": 30,
-        "sleep_interval_requests": 2,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
+        "retries": 1,
+        "fragment_retries": 1,
+        "extractor_retries": 1,
+        "socket_timeout": 15,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -315,13 +301,10 @@ def base_ydl_opts(job_id):
     opts = {
         "quiet": True,
         "no_warnings": False,
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 3,
-        "socket_timeout": 30,
-        "sleep_interval_requests": 2,
-        "sleep_interval": 2,
-        "max_sleep_interval": 5,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 2,
+        "socket_timeout": 20,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -379,39 +362,6 @@ def is_local_error(
     )
 
 
-def is_extraction_error(
-    exc
-):
-    text = str(
-        exc or ""
-    ).lower()
-    
-    indicators = [
-        "failed to extract any player response",
-        "unable to extract",
-        "player response",
-        "unable to extract yt initial data",
-        "unable to extract player version",
-        "incomplete data received",
-        "sign in to confirm",
-        "confirm you're not a bot",
-        "confirm you are not a bot",
-        "video unavailable",
-        "this content isn't available",
-        "this content is not available",
-        "http error 403",
-        "http error 429",
-        "po token",
-        "challenge",
-        "page needs to be reloaded",
-    ]
-    
-    return any(
-        item in text
-        for item in indicators
-    )
-
-
 # ============================================================
 # YOUTUBE INFO EXTRACTION
 # ============================================================
@@ -424,50 +374,36 @@ def extract_youtube_info(
     if not is_youtube_url(url):
         raise ValueError("Please enter a valid YouTube URL.")
         
-    errors = []
+    print(f"[INFO] Extracting info for: {url}", flush=True)
     
-    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
-        try:
-            # flush=True added so logs appear immediately
-            print(f"[YT] Trying strategy: {strategy_name}", flush=True)
-            
-            opts_extra = dict(extra or {})
-            opts_extra["noplaylist"] = not allow_playlist
-            opts_extra["skip_download"] = True
-            
-            opts = youtube_ydl_opts(
-                extra=opts_extra,
-                playlist=allow_playlist
+    opts_extra = dict(extra or {})
+    opts_extra["noplaylist"] = not allow_playlist
+    opts_extra["skip_download"] = True
+    
+    opts = youtube_ydl_opts(
+        extra=opts_extra,
+        playlist=allow_playlist
+    )
+    
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(
+                url,
+                download=False
             )
             
-            if strategy_kwargs:
-                opts.update(strategy_kwargs)
+        if info:
+            print("[INFO] SUCCESS", flush=True)
+            return info
             
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(
-                    url,
-                    download=False
-                )
-                
-            if info:
-                print(f"[YT] SUCCESS: {strategy_name}", flush=True)
-                return info
-                
-        except Exception as exc:
-            error_text = compact_error(exc)
-            errors.append(f"{strategy_name}: {error_text}")
-            print(f"[YT] FAILED: {strategy_name}", flush=True)
-            print(error_text, flush=True)
+    except Exception as exc:
+        error_text = compact_error(exc)
+        print(f"[INFO] FAILED: {error_text}", flush=True)
+        
+        if is_local_error(error_text):
+            raise
             
-            if is_local_error(error_text):
-                raise
-                
-    joined = "\n\n".join(errors)
-    raise RuntimeError(
-        "YouTube extraction failed after trying "
-        "all available extraction strategies.\n\n"
-        f"{joined}"
-    )
+        raise RuntimeError(f"YouTube extraction failed: {error_text}")
 
 
 # ============================================================
@@ -478,88 +414,69 @@ def extract_youtube_search(
     search_query,
     limit
 ):
-    errors = []
+    print(f"[SEARCH] Searching for: {search_query}", flush=True)
     
-    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
-        try:
-            print(f"[SEARCH] Trying strategy: {strategy_name}", flush=True)
-            
-            opts = youtube_ydl_opts(
-                extra={
-                    "extract_flat": True,
-                    "skip_download": True,
-                    "noplaylist": False,
-                },
-                playlist=True
+    opts = youtube_ydl_opts(
+        extra={
+            "extract_flat": True,
+            "skip_download": True,
+            "noplaylist": False,
+        },
+        playlist=True
+    )
+    
+    # Remove player_client constraints for search so it loads instantly without 429 errors
+    if "extractor_args" in opts:
+        del opts["extractor_args"]
+        
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            data = ydl.extract_info(
+                search_query,
+                download=False
             )
             
-            if strategy_kwargs:
-                opts.update(strategy_kwargs)
+        if data:
+            print("[SEARCH] SUCCESS", flush=True)
+            return data
             
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                data = ydl.extract_info(
-                    search_query,
-                    download=False
-                )
-                
-            if data:
-                print(f"[SEARCH] SUCCESS: {strategy_name}", flush=True)
-                return data
-                
-        except Exception as exc:
-            error_text = compact_error(exc)
-            errors.append(f"{strategy_name}: {error_text}")
-            print(f"[SEARCH] FAILED: {strategy_name}: {error_text}", flush=True)
+    except Exception as exc:
+        error_text = compact_error(exc)
+        print(f"[SEARCH] FAILED: {error_text}", flush=True)
+        
+        if is_local_error(error_text):
+            raise
             
-            if is_local_error(error_text):
-                raise
-                
-    raise RuntimeError(
-        "YouTube search failed.\n\n"
-        + "\n\n".join(errors)
-    )
+        raise RuntimeError(f"YouTube search failed: {error_text}")
 
 
 # ============================================================
-# DOWNLOAD WITH FALLBACK
+# DOWNLOAD HANDLER
 # ============================================================
 
-def download_with_fallback(
+def download_video(
     job_id,
     url,
     opts_factory
 ):
-    errors = []
+    print(f"[DOWNLOAD] Starting download for: {url}", flush=True)
     
-    for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
-        try:
-            print(f"[DOWNLOAD] Trying strategy: {strategy_name}", flush=True)
+    opts = opts_factory()
+    
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
             
-            opts = opts_factory()
+        print("[DOWNLOAD] SUCCESS", flush=True)
+        
+    except Exception as exc:
+        error_text = compact_error(exc)
+        print(f"[DOWNLOAD] FAILED: {error_text}", flush=True)
+        
+        if is_local_error(error_text):
+            raise
             
-            if strategy_kwargs:
-                opts.update(strategy_kwargs)
-            
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-                
-            print(f"[DOWNLOAD] SUCCESS: {strategy_name}", flush=True)
-            return
-            
-        except Exception as exc:
-            error_text = compact_error(exc)
-            errors.append(f"{strategy_name}: {error_text}")
-            print(f"[DOWNLOAD] FAILED: {strategy_name}", flush=True)
-            print(error_text, flush=True)
-            
-            if is_local_error(error_text):
-                raise
-                
-    raise RuntimeError(
-        "YouTube download failed after trying "
-        "all extraction strategies.\n\n"
-        + "\n\n".join(errors)
-    )
+        raise RuntimeError(f"Download failed: {error_text}")
 
 
 # ============================================================
@@ -981,7 +898,7 @@ def run_single_video(
         percent=0
     )
     
-    download_with_fallback(
+    download_video(
         job_id,
         url,
         make_options
@@ -1289,7 +1206,7 @@ def run_playlist(
             
             return opts
             
-        download_with_fallback(
+        download_video(
             job_id,
             video_url,
             make_options
@@ -1427,8 +1344,7 @@ def execute_job(
             exc
         )
         print(
-            f"[JOB ERROR] {job_id}: "
-            f"{error_text}", flush=True
+            f"[JOB ERROR] {job_id}: {error_text}", flush=True
         )
         update_job(
             job_id,
@@ -1444,12 +1360,11 @@ def execute_job(
 # HOME
 # ============================================================
 
-# Note: index file is fast IO, so async def is fine.
 @app.get(
     "/",
     response_class=HTMLResponse
 )
-async def index():
+def index():
     index_file = (
         STATIC_DIR /
         "index.html"
@@ -1480,7 +1395,7 @@ async def index():
 # ============================================================
 # INFO API
 # ============================================================
-# Changed to def (sync) so yt-dlp doesn't block the async event loop
+
 @app.api_route(
     "/api/info",
     methods=[
@@ -1522,15 +1437,14 @@ def api_info(
         )
         raise HTTPException(
             400,
-            "Unable to extract video information: "
-            f"{error_text}"
+            f"Unable to extract video information: {error_text}"
         )
 
 
 # ============================================================
 # SEARCH API
 # ============================================================
-# Changed to def (sync) so yt-dlp doesn't block the async event loop
+
 @app.post(
     "/api/search"
 )
@@ -1633,7 +1547,7 @@ def api_search(
 # ============================================================
 # PLAYLIST API
 # ============================================================
-# Changed to def (sync) so yt-dlp doesn't block the async event loop
+
 @app.api_route(
     "/api/playlist",
     methods=[
@@ -1689,8 +1603,7 @@ def api_playlist(
         )
         raise HTTPException(
             400,
-            "Playlist extraction failed: "
-            f"{error_text}"
+            f"Playlist extraction failed: {error_text}"
         )
         
     entries = []
@@ -1966,11 +1879,6 @@ def api_health():
             MAX_SEARCH_RESULTS,
         "max_concurrent_jobs":
             MAX_CONCURRENT_JOBS,
-        "youtube_clients": [
-            x[0]
-            for x in
-            YOUTUBE_CLIENT_STRATEGIES
-        ],
         "info_methods": [
             "GET",
             "POST"
@@ -2050,7 +1958,7 @@ def youtube_test():
 @app.on_event(
     "startup"
 )
-async def startup_event():
+def startup_event():
     DOWNLOAD_ROOT.mkdir(
         parents=True,
         exist_ok=True
@@ -2112,14 +2020,6 @@ async def startup_event():
             exc, flush=True
         )
         
-    print(
-        "YouTube strategies:",
-        ", ".join(
-            x[0]
-            for x in
-            YOUTUBE_CLIENT_STRATEGIES
-        ), flush=True
-    )
     print(
         "Download directory:",
         DOWNLOAD_ROOT, flush=True
