@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -41,7 +41,6 @@ MAX_CONCURRENT_JOBS = int(
     os.getenv("MAX_CONCURRENT_JOBS", "2")
 )
 
-
 DOWNLOAD_ROOT.mkdir(
     parents=True,
     exist_ok=True
@@ -54,9 +53,8 @@ DOWNLOAD_ROOT.mkdir(
 
 app = FastAPI(
     title=APP_NAME,
-    version="2.0.0"
+    version="2.1.0"
 )
-
 
 STATIC_DIR = BASE_DIR / "static"
 
@@ -87,7 +85,7 @@ active_jobs_lock = threading.Lock()
 
 class DownloadRequest(BaseModel):
 
-    url: str
+    url: str = ""
 
     mode: str = Field(
         default="video",
@@ -225,6 +223,17 @@ def get_deno():
     return shutil.which("deno")
 
 
+def resolve_url(
+    request: DownloadRequest | None,
+    query_url: str = ""
+) -> str:
+
+    if request and request.url:
+        return request.url.strip()
+
+    return (query_url or "").strip()
+
+
 # ============================================================
 # YT-DLP CONFIGURATION
 # ============================================================
@@ -258,23 +267,18 @@ def youtube_ydl_opts(extra=None):
 
         "ffmpeg_location": get_ffmpeg(),
 
-        # IMPORTANT:
-        # Current yt-dlp Python API expects a DICT here.
         "js_runtimes": {
             "deno": {
                 "path": deno_path
             }
         },
 
-        # IMPORTANT:
-        # This must be a LIST, not a string.
         "remote_components": [
             "ejs:github"
         ],
     }
 
     if extra:
-
         opts.update(extra)
 
     return opts
@@ -356,12 +360,6 @@ def choose_format(
 ):
 
     height = int(quality)
-
-    # Prefer H.264/AVC + AAC.
-    #
-    # Fallbacks are included so the downloader does not
-    # unnecessarily fail when a video does not expose
-    # an AVC/AAC combination.
 
     if audio_language:
 
@@ -529,7 +527,9 @@ def get_info(url):
 
     })
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(
+        opts
+    ) as ydl:
 
         info = ydl.extract_info(
             url,
@@ -709,16 +709,16 @@ def run_single_video(
         )
     )
 
+    final_template = str(
+        output_dir /
+        f"{title}.%(ext)s"
+    )
+
+    opts = base_ydl_opts(
+        job_id
+    )
+
     if mode == "audio":
-
-        final_template = str(
-            output_dir /
-            f"{title}.%(ext)s"
-        )
-
-        opts = base_ydl_opts(
-            job_id
-        )
 
         opts.update({
 
@@ -755,15 +755,6 @@ def run_single_video(
 
     else:
 
-        final_template = str(
-            output_dir /
-            f"{title}.%(ext)s"
-        )
-
-        opts = base_ydl_opts(
-            job_id
-        )
-
         opts.update({
 
             "outtmpl": final_template,
@@ -792,12 +783,6 @@ def run_single_video(
             ],
 
         })
-
-    # Attach job ID to progress hook.
-    old_hooks = opts.get(
-        "progress_hooks",
-        []
-    )
 
     def job_progress(data):
 
@@ -843,7 +828,6 @@ def run_single_video(
             "Download finished but no output file was found."
         )
 
-    # Select newest generated file.
     result = max(
         files,
         key=lambda p: p.stat().st_mtime
@@ -982,7 +966,6 @@ def run_playlist(
         )
 
         if not video_url:
-
             continue
 
         numbered_name = (
@@ -1014,16 +997,16 @@ def run_playlist(
 
         )
 
+        template = str(
+            playlist_dir /
+            f"{numbered_name}.%(ext)s"
+        )
+
+        opts = base_ydl_opts(
+            job_id
+        )
+
         if mode == "audio":
-
-            template = str(
-                playlist_dir /
-                f"{numbered_name}.%(ext)s"
-            )
-
-            opts = base_ydl_opts(
-                job_id
-            )
 
             opts.update({
 
@@ -1053,15 +1036,6 @@ def run_playlist(
 
         else:
 
-            template = str(
-                playlist_dir /
-                f"{numbered_name}.%(ext)s"
-            )
-
-            opts = base_ydl_opts(
-                job_id
-            )
-
             opts.update({
 
                 "outtmpl": template,
@@ -1075,6 +1049,9 @@ def run_playlist(
                     "mp4",
 
                 "postprocessor_args": [
+
+                    "-c:v",
+                    "copy",
 
                     "-c:a",
                     "aac",
@@ -1096,76 +1073,69 @@ def run_playlist(
             count=total
         ):
 
-            data["_smart_job_id"] = jid
+            if data.get("status") != "downloading":
+                return
 
-            if data.get(
-                "status"
-            ) == "downloading":
+            downloaded = data.get(
+                "downloaded_bytes",
+                0
+            )
 
-                downloaded = data.get(
-                    "downloaded_bytes",
-                    0
-                )
+            total_bytes = (
+                data.get("total_bytes")
+                or data.get("total_bytes_estimate")
+                or 0
+            )
 
-                total_bytes = (
-                    data.get(
-                        "total_bytes"
-                    )
-                    or data.get(
-                        "total_bytes_estimate"
-                    )
-                    or 0
-                )
+            item_percent = 0
 
-                item_percent = 0
+            if total_bytes:
 
-                if total_bytes:
-
-                    item_percent = (
-                        downloaded /
-                        total_bytes
-                    ) * 100
-
-                overall = (
-                    (
-                        (pos - 1)
-                        + item_percent / 100
-                    )
-                    / count
+                item_percent = (
+                    downloaded /
+                    total_bytes
                 ) * 100
 
-                update_job(
-
-                    jid,
-
-                    status="downloading",
-
-                    current=pos,
-
-                    total=count,
-
-                    percent=round(
-                        overall,
-                        1
-                    ),
-
-                    downloaded=format_bytes(
-                        downloaded
-                    ),
-
-                    speed=(
-                        f"{format_bytes(data.get('speed'))}/s"
-                        if data.get("speed")
-                        else ""
-                    ),
-
-                    eta=(
-                        f"{data.get('eta')}s"
-                        if data.get("eta") is not None
-                        else ""
-                    )
-
+            overall = (
+                (
+                    (pos - 1)
+                    + item_percent / 100
                 )
+                / count
+            ) * 100
+
+            update_job(
+
+                jid,
+
+                status="downloading",
+
+                current=pos,
+
+                total=count,
+
+                percent=round(
+                    overall,
+                    1
+                ),
+
+                downloaded=format_bytes(
+                    downloaded
+                ),
+
+                speed=(
+                    f"{format_bytes(data.get('speed'))}/s"
+                    if data.get("speed")
+                    else ""
+                ),
+
+                eta=(
+                    f"{data.get('eta')}s"
+                    if data.get("eta") is not None
+                    else ""
+                )
+
+            )
 
         opts["progress_hooks"] = [
             playlist_progress
@@ -1202,7 +1172,6 @@ def run_playlist(
             "Playlist download completed but no files were created."
         )
 
-    # Create ZIP archive.
     zip_path = (
         DOWNLOAD_ROOT /
         job_id /
@@ -1345,6 +1314,10 @@ def execute_job(
 
     except Exception as exc:
 
+        print(
+            f"[JOB ERROR] {job_id}: {exc}"
+        )
+
         update_job(
 
             job_id,
@@ -1363,7 +1336,7 @@ def execute_job(
 
 
 # ============================================================
-# ROUTES
+# HOME
 # ============================================================
 
 @app.get(
@@ -1402,18 +1375,39 @@ async def index():
 
 # ============================================================
 # INFO API
+#
+# IMPORTANT:
+# Supports BOTH:
+#
+# POST /api/info
+# JSON:
+# {"url":"https://youtube.com/..."}
+#
+# AND:
+#
+# GET /api/info?url=https://youtube.com/...
+#
+# This eliminates 405 errors caused by frontend/backend
+# request-method mismatches.
 # ============================================================
 
-@app.post(
-    "/api/info"
+@app.api_route(
+    "/api/info",
+    methods=["GET", "POST"]
 )
 async def api_info(
-    request: DownloadRequest
+    request: DownloadRequest | None = None,
+    url: str = Query(
+        default=""
+    )
 ):
 
-    url = request.url.strip()
+    final_url = resolve_url(
+        request,
+        url
+    )
 
-    if not url:
+    if not final_url:
 
         raise HTTPException(
             400,
@@ -1423,7 +1417,7 @@ async def api_info(
     try:
 
         info = get_info(
-            url
+            final_url
         )
 
         return build_info_response(
@@ -1431,6 +1425,11 @@ async def api_info(
         )
 
     except Exception as exc:
+
+        print(
+            "[INFO ERROR]",
+            repr(exc)
+        )
 
         raise HTTPException(
             400,
@@ -1489,6 +1488,11 @@ async def api_search(
             )
 
     except Exception as exc:
+
+        print(
+            "[SEARCH ERROR]",
+            repr(exc)
+        )
 
         raise HTTPException(
             400,
@@ -1553,22 +1557,47 @@ async def api_search(
 
 # ============================================================
 # PLAYLIST INFO
+#
+# IMPORTANT:
+# Supports BOTH GET and POST.
+#
+# POST:
+# {"url":"https://youtube.com/playlist?..."}
+#
+# GET:
+# /api/playlist?url=https://youtube.com/playlist?...
 # ============================================================
 
-@app.post(
-    "/api/playlist"
+@app.api_route(
+    "/api/playlist",
+    methods=["GET", "POST"]
 )
 async def api_playlist(
-    request: DownloadRequest
+    request: DownloadRequest | None = None,
+    url: str = Query(
+        default=""
+    )
 ):
 
-    url = request.url.strip()
+    final_url = resolve_url(
+        request,
+        url
+    )
 
-    if not url:
+    if not final_url:
 
         raise HTTPException(
             400,
             "Playlist URL is required."
+        )
+
+    if not is_youtube_url(
+        final_url
+    ):
+
+        raise HTTPException(
+            400,
+            "Only YouTube playlist URLs are supported."
         )
 
     opts = youtube_ydl_opts({
@@ -1590,11 +1619,16 @@ async def api_playlist(
         ) as ydl:
 
             data = ydl.extract_info(
-                url,
+                final_url,
                 download=False
             )
 
     except Exception as exc:
+
+        print(
+            "[PLAYLIST ERROR]",
+            repr(exc)
+        )
 
         raise HTTPException(
             400,
@@ -1894,6 +1928,8 @@ async def api_health():
 
         "app": APP_NAME,
 
+        "version": "2.1.0",
+
         "yt_dlp": ytdlp_version,
 
         "deno": bool(deno),
@@ -1919,6 +1955,20 @@ async def api_health():
         "max_concurrent_jobs":
             MAX_CONCURRENT_JOBS,
 
+        "info_methods": [
+            "GET",
+            "POST"
+        ],
+
+        "playlist_methods": [
+            "GET",
+            "POST"
+        ],
+
+        "download_methods": [
+            "POST"
+        ],
+
     }
 
 
@@ -1941,6 +1991,11 @@ async def startup_event():
     print(APP_NAME)
 
     print("=" * 60)
+
+    print(
+        "Version:",
+        "2.1.0"
+    )
 
     print(
         "yt-dlp:",
@@ -1988,6 +2043,18 @@ async def startup_event():
     print(
         "Download directory:",
         DOWNLOAD_ROOT
+    )
+
+    print(
+        "INFO API: GET + POST"
+    )
+
+    print(
+        "PLAYLIST API: GET + POST"
+    )
+
+    print(
+        "DOWNLOAD API: POST"
     )
 
     print("=" * 60)
