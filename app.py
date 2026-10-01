@@ -228,9 +228,13 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
-
+# Cloud IP block/429 se bachne ke liye fallback strategies zaroori hain.
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("default", None),
+    ("default", None),                      # Pehle default try karega
+    ("ios", ["ios"]),                       # Agar 429 block hua toh iOS spoof
+    ("android", ["android"]),               # Agar ios fail toh Android spoof
+    ("tv", ["tv"]),                         # TV spoof
+    ("web_embedded", ["web_embedded"]),     # Embedded spoof
 ]
 
 
@@ -1949,7 +1953,7 @@ async def api_health():
         "max_concurrent_jobs":
             MAX_CONCURRENT_JOBS,
         "youtube_clients": [
-            x[0]  # Changed because it's a tuple now
+            x[0]
             for x in
             YOUTUBE_CLIENT_STRATEGIES
         ],
@@ -2039,7 +2043,7 @@ async def startup_event():
     print(
         "YouTube strategies:",
         ", ".join(
-            x[0]  # Changed because it's a tuple now
+            x[0]
             for x in
             YOUTUBE_CLIENT_STRATEGIES
         )
