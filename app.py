@@ -230,12 +230,13 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
+# "skip": ["webpage"] waapis add kar diya gaya hai jaisa aapne manga tha
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
-    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"]}}}),
-    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"]}}}),
-    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
-    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
+    ("android", {"extractor_args": {"youtube": {"player_client": ["android"], "skip": ["webpage"]}}}),
+    ("ios", {"extractor_args": {"youtube": {"player_client": ["ios"], "skip": ["webpage"]}}}),
+    ("mweb", {"extractor_args": {"youtube": {"player_client": ["mweb"], "skip": ["webpage"]}}}),
+    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"], "skip": ["webpage"]}}}),
+    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"], "skip": ["webpage"]}}}),
     ("default", None),
 ]
 
@@ -254,7 +255,8 @@ def add_bypass_options(opts):
         }
     opts["remote_components"] = ["ejs:github"]
     
-    # Impersonate removed because curl_cffi compilation fails on Render
+    # Render par 'impersonate' curl_cffi hang karta hai, isliye hata diya
+    # opts["impersonate"] = "chrome" 
     
     # 2. Automatic Cookie Detection (The ultimate fallback for 429 errors)
     cookie_path = BASE_DIR / "cookies.txt"
@@ -426,7 +428,8 @@ def extract_youtube_info(
     
     for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(f"[YT] Trying strategy: {strategy_name}")
+            # flush=True added so logs appear immediately
+            print(f"[YT] Trying strategy: {strategy_name}", flush=True)
             
             opts_extra = dict(extra or {})
             opts_extra["noplaylist"] = not allow_playlist
@@ -447,14 +450,14 @@ def extract_youtube_info(
                 )
                 
             if info:
-                print(f"[YT] SUCCESS: {strategy_name}")
+                print(f"[YT] SUCCESS: {strategy_name}", flush=True)
                 return info
                 
         except Exception as exc:
             error_text = compact_error(exc)
             errors.append(f"{strategy_name}: {error_text}")
-            print(f"[YT] FAILED: {strategy_name}")
-            print(error_text)
+            print(f"[YT] FAILED: {strategy_name}", flush=True)
+            print(error_text, flush=True)
             
             if is_local_error(error_text):
                 raise
@@ -479,7 +482,7 @@ def extract_youtube_search(
     
     for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(f"[SEARCH] Trying strategy: {strategy_name}")
+            print(f"[SEARCH] Trying strategy: {strategy_name}", flush=True)
             
             opts = youtube_ydl_opts(
                 extra={
@@ -500,13 +503,13 @@ def extract_youtube_search(
                 )
                 
             if data:
-                print(f"[SEARCH] SUCCESS: {strategy_name}")
+                print(f"[SEARCH] SUCCESS: {strategy_name}", flush=True)
                 return data
                 
         except Exception as exc:
             error_text = compact_error(exc)
             errors.append(f"{strategy_name}: {error_text}")
-            print(f"[SEARCH] FAILED: {strategy_name}: {error_text}")
+            print(f"[SEARCH] FAILED: {strategy_name}: {error_text}", flush=True)
             
             if is_local_error(error_text):
                 raise
@@ -530,7 +533,7 @@ def download_with_fallback(
     
     for strategy_name, strategy_kwargs in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(f"[DOWNLOAD] Trying strategy: {strategy_name}")
+            print(f"[DOWNLOAD] Trying strategy: {strategy_name}", flush=True)
             
             opts = opts_factory()
             
@@ -540,14 +543,14 @@ def download_with_fallback(
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
                 
-            print(f"[DOWNLOAD] SUCCESS: {strategy_name}")
+            print(f"[DOWNLOAD] SUCCESS: {strategy_name}", flush=True)
             return
             
         except Exception as exc:
             error_text = compact_error(exc)
             errors.append(f"{strategy_name}: {error_text}")
-            print(f"[DOWNLOAD] FAILED: {strategy_name}")
-            print(error_text)
+            print(f"[DOWNLOAD] FAILED: {strategy_name}", flush=True)
+            print(error_text, flush=True)
             
             if is_local_error(error_text):
                 raise
@@ -1425,7 +1428,7 @@ def execute_job(
         )
         print(
             f"[JOB ERROR] {job_id}: "
-            f"{error_text}"
+            f"{error_text}", flush=True
         )
         update_job(
             job_id,
@@ -1441,6 +1444,7 @@ def execute_job(
 # HOME
 # ============================================================
 
+# Note: index file is fast IO, so async def is fine.
 @app.get(
     "/",
     response_class=HTMLResponse
@@ -1476,7 +1480,7 @@ async def index():
 # ============================================================
 # INFO API
 # ============================================================
-
+# Changed to def (sync) so yt-dlp doesn't block the async event loop
 @app.api_route(
     "/api/info",
     methods=[
@@ -1484,7 +1488,7 @@ async def index():
         "POST"
     ]
 )
-async def api_info(
+def api_info(
     request: DownloadRequest | None = None,
     url: str = Query(
         default=""
@@ -1514,7 +1518,7 @@ async def api_info(
         )
         print(
             "[INFO ERROR]",
-            error_text
+            error_text, flush=True
         )
         raise HTTPException(
             400,
@@ -1526,11 +1530,11 @@ async def api_info(
 # ============================================================
 # SEARCH API
 # ============================================================
-
+# Changed to def (sync) so yt-dlp doesn't block the async event loop
 @app.post(
     "/api/search"
 )
-async def api_search(
+def api_search(
     request: SearchRequest
 ):
     query = request.query.strip()
@@ -1561,7 +1565,7 @@ async def api_search(
         )
         print(
             "[SEARCH ERROR]",
-            error_text
+            error_text, flush=True
         )
         raise HTTPException(
             400,
@@ -1629,7 +1633,7 @@ async def api_search(
 # ============================================================
 # PLAYLIST API
 # ============================================================
-
+# Changed to def (sync) so yt-dlp doesn't block the async event loop
 @app.api_route(
     "/api/playlist",
     methods=[
@@ -1637,7 +1641,7 @@ async def api_search(
         "POST"
     ]
 )
-async def api_playlist(
+def api_playlist(
     request: DownloadRequest | None = None,
     url: str = Query(
         default=""
@@ -1681,7 +1685,7 @@ async def api_playlist(
         )
         print(
             "[PLAYLIST ERROR]",
-            error_text
+            error_text, flush=True
         )
         raise HTTPException(
             400,
@@ -1762,7 +1766,7 @@ async def api_playlist(
 @app.post(
     "/api/download"
 )
-async def api_download(
+def api_download(
     request: DownloadRequest
 ):
     global active_jobs
@@ -1831,7 +1835,7 @@ async def api_download(
 @app.get(
     "/api/jobs/{job_id}"
 )
-async def api_job_status(
+def api_job_status(
     job_id: str
 ):
     with jobs_lock:
@@ -1857,7 +1861,7 @@ async def api_job_status(
 @app.get(
     "/api/jobs/{job_id}/file"
 )
-async def api_job_file(
+def api_job_file(
     job_id: str
 ):
     with jobs_lock:
@@ -1909,7 +1913,7 @@ async def api_job_file(
 @app.get(
     "/api/health"
 )
-async def api_health():
+def api_health():
     deno = get_deno()
     
     ffmpeg = shutil.which(
@@ -2053,17 +2057,17 @@ async def startup_event():
     )
     
     print(
-        "=" * 70
+        "=" * 70, flush=True
     )
     print(
-        APP_NAME
+        APP_NAME, flush=True
     )
     print(
         "Version:",
-        APP_VERSION
+        APP_VERSION, flush=True
     )
     print(
-        "=" * 70
+        "=" * 70, flush=True
     )
     
     print(
@@ -2072,13 +2076,13 @@ async def startup_event():
             yt_dlp.version,
             "__version__",
             "unknown"
-        )
+        ), flush=True
     )
     print(
         "Deno:",
         get_deno()
         or
-        "NOT FOUND"
+        "NOT FOUND", flush=True
     )
     print(
         "FFmpeg:",
@@ -2086,7 +2090,7 @@ async def startup_event():
             "ffmpeg"
         )
         or
-        "NOT FOUND"
+        "NOT FOUND", flush=True
     )
     print(
         "FFprobe:",
@@ -2094,18 +2098,18 @@ async def startup_event():
             "ffprobe"
         )
         or
-        "NOT FOUND"
+        "NOT FOUND", flush=True
     )
     
     try:
         import yt_dlp_ejs
         print(
-            "yt-dlp-ejs: OK"
+            "yt-dlp-ejs: OK", flush=True
         )
     except Exception as exc:
         print(
             "yt-dlp-ejs: NOT AVAILABLE",
-            exc
+            exc, flush=True
         )
         
     print(
@@ -2114,24 +2118,24 @@ async def startup_event():
             x[0]
             for x in
             YOUTUBE_CLIENT_STRATEGIES
-        )
+        ), flush=True
     )
     print(
         "Download directory:",
-        DOWNLOAD_ROOT
+        DOWNLOAD_ROOT, flush=True
     )
     print(
-        "INFO API: GET + POST"
+        "INFO API: GET + POST", flush=True
     )
     print(
-        "PLAYLIST API: GET + POST"
+        "PLAYLIST API: GET + POST", flush=True
     )
     print(
-        "SEARCH API: POST"
+        "SEARCH API: POST", flush=True
     )
     print(
-        "DOWNLOAD API: POST"
+        "DOWNLOAD API: POST", flush=True
     )
     print(
-        "=" * 70
+        "=" * 70, flush=True
     )
