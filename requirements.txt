@@ -3,3 +3,4 @@ uvicorn[standard]
 pydantic
 yt-dlp[default]
 yt-dlp-ejs
+curl_cffi
