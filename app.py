@@ -202,6 +202,9 @@ def get_deno():
     )
 
 
+DENO_PATH = get_deno()
+
+
 def resolve_url(
     request: DownloadRequest | None,
     query_url: str = ""
@@ -227,71 +230,9 @@ def compact_error(exc):
 # ============================================================
 
 YOUTUBE_CLIENT_STRATEGIES = [
-    {
-        "name": "native_default",
-        "extractor_args": None,
-    },
-    {
-        "name": "web_embedded",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "web_embedded"
-                ]
-            }
-        }
-    },
-    {
-        "name": "web_embedded_default",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "web_embedded",
-                    "default"
-                ]
-            }
-        }
-    },
-    {
-        "name": "android_vr",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "android_vr"
-                ]
-            }
-        }
-    },
-    {
-        "name": "tv_downgraded",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "tv_downgraded"
-                ]
-            }
-        }
-    },
-    {
-        "name": "mweb",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "mweb"
-                ]
-            }
-        }
-    },
-    {
-        "name": "ios",
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "ios"
-                ]
-            }
-        }
-    },
+    ("default", None),
+    ("web_embedded_default", ["web_embedded", "default"]),
+    ("android", ["android"]),
 ]
 
 
@@ -299,27 +240,20 @@ YOUTUBE_CLIENT_STRATEGIES = [
 # COMMON YT-DLP OPTIONS
 # ============================================================
 
-def add_youtube_runtime_options(
-    opts
-):
-    deno_path = get_deno()
-    if deno_path:
+def add_youtube_runtime_options(opts):
+    if DENO_PATH:
         opts["js_runtimes"] = {
             "deno": {
-                "path": deno_path
+                "path": DENO_PATH
             }
         }
         
-    opts["remote_components"] = [
-        "ejs:github"
-    ]
-    
+    opts["remote_components"] = ["ejs:github"]
     return opts
 
 
 def youtube_ydl_opts(
     extra=None,
-    strategy=None,
     playlist=False
 ):
     opts = {
@@ -335,33 +269,15 @@ def youtube_ydl_opts(
         "noplaylist": not playlist,
     }
     
-    opts = add_youtube_runtime_options(
-        opts
-    )
-    
-    if strategy:
-        extractor_args = (
-            strategy.get(
-                "extractor_args"
-            )
-        )
-        if extractor_args:
-            opts["extractor_args"] = (
-                extractor_args
-            )
+    opts = add_youtube_runtime_options(opts)
             
     if extra:
-        opts.update(
-            extra
-        )
+        opts.update(extra)
         
     return opts
 
 
-def base_ydl_opts(
-    job_id,
-    strategy=None
-):
+def base_ydl_opts(job_id):
     output_dir = (
         DOWNLOAD_ROOT /
         job_id
@@ -395,20 +311,7 @@ def base_ydl_opts(
         "noprogress": True,
     }
     
-    opts = add_youtube_runtime_options(
-        opts
-    )
-    
-    if strategy:
-        extractor_args = (
-            strategy.get(
-                "extractor_args"
-            )
-        )
-        if extractor_args:
-            opts["extractor_args"] = (
-                extractor_args
-            )
+    opts = add_youtube_runtime_options(opts)
             
     return opts
 
@@ -484,73 +387,51 @@ def extract_youtube_info(
     extra=None,
     allow_playlist=False
 ):
-    if not is_youtube_url(
-        url
-    ):
-        raise ValueError(
-            "Please enter a valid YouTube URL."
-        )
+    if not is_youtube_url(url):
+        raise ValueError("Please enter a valid YouTube URL.")
         
     errors = []
     
-    for strategy in YOUTUBE_CLIENT_STRATEGIES:
-        name = strategy["name"]
-        
+    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(
-                f"[YT] Trying strategy: {name}"
-            )
+            print(f"[YT] Trying strategy: {strategy_name}")
             
-            opts_extra = dict(
-                extra or {}
-            )
-            opts_extra["noplaylist"] = (
-                not allow_playlist
-            )
+            opts_extra = dict(extra or {})
+            opts_extra["noplaylist"] = not allow_playlist
             opts_extra["skip_download"] = True
             
             opts = youtube_ydl_opts(
                 extra=opts_extra,
-                strategy=strategy,
                 playlist=allow_playlist
             )
             
-            with yt_dlp.YoutubeDL(
-                opts
-            ) as ydl:
+            if player_clients:
+                opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": player_clients
+                    }
+                }
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(
                     url,
                     download=False
                 )
                 
             if info:
-                print(
-                    f"[YT] SUCCESS: {name}"
-                )
+                print(f"[YT] SUCCESS: {strategy_name}")
                 return info
                 
         except Exception as exc:
-            error_text = compact_error(
-                exc
-            )
-            errors.append(
-                f"{name}: {error_text}"
-            )
-            print(
-                f"[YT] FAILED: {name}"
-            )
-            print(
-                error_text
-            )
+            error_text = compact_error(exc)
+            errors.append(f"{strategy_name}: {error_text}")
+            print(f"[YT] FAILED: {strategy_name}")
+            print(error_text)
             
-            if is_local_error(
-                error_text
-            ):
+            if is_local_error(error_text):
                 raise
                 
-    joined = "\n\n".join(
-        errors
-    )
+    joined = "\n\n".join(errors)
     raise RuntimeError(
         "YouTube extraction failed after trying "
         "all available extraction strategies.\n\n"
@@ -568,13 +449,9 @@ def extract_youtube_search(
 ):
     errors = []
     
-    for strategy in YOUTUBE_CLIENT_STRATEGIES:
-        name = strategy["name"]
-        
+    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(
-                f"[SEARCH] Trying strategy: {name}"
-            )
+            print(f"[SEARCH] Trying strategy: {strategy_name}")
             
             opts = youtube_ydl_opts(
                 extra={
@@ -582,39 +459,32 @@ def extract_youtube_search(
                     "skip_download": True,
                     "noplaylist": False,
                 },
-                strategy=strategy,
                 playlist=True
             )
             
-            with yt_dlp.YoutubeDL(
-                opts
-            ) as ydl:
+            if player_clients:
+                opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": player_clients
+                    }
+                }
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 data = ydl.extract_info(
                     search_query,
                     download=False
                 )
                 
             if data:
-                print(
-                    f"[SEARCH] SUCCESS: {name}"
-                )
+                print(f"[SEARCH] SUCCESS: {strategy_name}")
                 return data
                 
         except Exception as exc:
-            error_text = compact_error(
-                exc
-            )
-            errors.append(
-                f"{name}: {error_text}"
-            )
-            print(
-                f"[SEARCH] FAILED: {name}: "
-                f"{error_text}"
-            )
+            error_text = compact_error(exc)
+            errors.append(f"{strategy_name}: {error_text}")
+            print(f"[SEARCH] FAILED: {strategy_name}: {error_text}")
             
-            if is_local_error(
-                error_text
-            ):
+            if is_local_error(error_text):
                 raise
                 
     raise RuntimeError(
@@ -634,47 +504,32 @@ def download_with_fallback(
 ):
     errors = []
     
-    for strategy in YOUTUBE_CLIENT_STRATEGIES:
-        name = strategy["name"]
-        
+    for strategy_name, player_clients in YOUTUBE_CLIENT_STRATEGIES:
         try:
-            print(
-                f"[DOWNLOAD] Trying strategy: {name}"
-            )
+            print(f"[DOWNLOAD] Trying strategy: {strategy_name}")
             
-            opts = opts_factory(
-                strategy
-            )
+            opts = opts_factory()
             
-            with yt_dlp.YoutubeDL(
-                opts
-            ) as ydl:
-                ydl.download([
-                    url
-                ])
+            if player_clients:
+                opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": player_clients
+                    }
+                }
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
                 
-            print(
-                f"[DOWNLOAD] SUCCESS: {name}"
-            )
+            print(f"[DOWNLOAD] SUCCESS: {strategy_name}")
             return
             
         except Exception as exc:
-            error_text = compact_error(
-                exc
-            )
-            errors.append(
-                f"{name}: {error_text}"
-            )
-            print(
-                f"[DOWNLOAD] FAILED: {name}"
-            )
-            print(
-                error_text
-            )
+            error_text = compact_error(exc)
+            errors.append(f"{strategy_name}: {error_text}")
+            print(f"[DOWNLOAD] FAILED: {strategy_name}")
+            print(error_text)
             
-            if is_local_error(
-                error_text
-            ):
+            if is_local_error(error_text):
                 raise
                 
     raise RuntimeError(
@@ -1030,13 +885,8 @@ def run_single_video(
     # --------------------------------------------------------
     # Build download options
     # --------------------------------------------------------
-    def make_options(
-        strategy
-    ):
-        opts = base_ydl_opts(
-            job_id,
-            strategy
-        )
+    def make_options():
+        opts = base_ydl_opts(job_id)
         
         opts.update({
             "outtmpl":
@@ -1287,15 +1137,11 @@ def run_playlist(
         )
         
         def make_options(
-            strategy,
             pos=position,
             count=total,
             out_template=template
         ):
-            opts = base_ydl_opts(
-                job_id,
-                strategy
-            )
+            opts = base_ydl_opts(job_id)
             
             opts.update({
                 "outtmpl":
@@ -2097,7 +1943,7 @@ async def api_health():
         "max_concurrent_jobs":
             MAX_CONCURRENT_JOBS,
         "youtube_clients": [
-            x["name"]
+            x[0]  # Changed because it's a tuple now
             for x in
             YOUTUBE_CLIENT_STRATEGIES
         ],
@@ -2187,7 +2033,7 @@ async def startup_event():
     print(
         "YouTube strategies:",
         ", ".join(
-            x["name"]
+            x[0]  # Changed because it's a tuple now
             for x in
             YOUTUBE_CLIENT_STRATEGIES
         )
