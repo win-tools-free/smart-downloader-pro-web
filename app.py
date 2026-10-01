@@ -230,13 +230,35 @@ def compact_error(exc):
 # ============================================================
 # YOUTUBE CLIENT STRATEGIES
 # ============================================================
+# Render/Cloud IP ke 429 limits (watch page block) ko bypass karne ke liye
+# hum explicitly "webpage" extraction skip kar rahe hain aur direct Mobile API use kar rahe hain.
 
 YOUTUBE_CLIENT_STRATEGIES = [
-    ("tv", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}),
-    ("web_embedded", {"extractor_args": {"youtube": {"player_client": ["web_embedded"]}}}),
+    ("android_api", {
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["webpage"]
+            }
+        }
+    }),
+    ("ios_api", {
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios"],
+                "skip": ["webpage"]
+            }
+        }
+    }),
+    ("tv_api", {
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv"],
+                "skip": ["webpage"]
+            }
+        }
+    }),
 ]
-
-
 # ============================================================
 # COMMON YT-DLP OPTIONS
 # ============================================================
